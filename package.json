@@ -1,0 +1,6 @@
+{
+  "name": "sunmap",
+  "private": true,
+  "description": "SUNMAP - daily solar and lunar cycle, timed to the second. Dev port 5198 (CLAUDE.md RULE 20).",
+  "scripts": { "dev": "npx http-server . -p 5198 -c-1" }
+}

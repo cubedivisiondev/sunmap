@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SUNMAP | Sunrise, Sunset, Twilight - Timed To The Second</title>
+<meta name="description" content="Every solar and lunar moment of your day, solved to the second for your exact location on the Swiss Ephemeris. Sunrise, sunset, golden hour, the full twilight ladder, and the Moon. Computed on your device.">
+<link rel="canonical" href="https://sunmap.puddystudios.com/">
+<meta name="robots" content="noindex,nofollow">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Puddy Studios">
+<meta property="og:title" content="SUNMAP | Sunrise, Sunset, Twilight - Timed To The Second">
+<meta property="og:description" content="Every solar and lunar moment of your day, solved to the second for your exact location. Computed on your device.">
+<meta property="og:url" content="https://sunmap.puddystudios.com/">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<style>
+:root{
+  --bg:#000; --ink:#fff; --dim:#8a8a8a; --line:#1e1e1e;
+  --sun:#f2b544; --moon:#b6c0ce;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--ink); min-height:100vh;
+  font-family:ui-sans-serif,system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased; overflow-x:hidden;
+}
+.wrap{width:100%;max-width:940px;margin:0 auto;padding:0 20px}
+
+/* ---------- BEAMS OF LIGHT ---------- */
+#beams{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none}
+#beams .ray{transform-origin:50% 0%;animation:sweep 18s ease-in-out infinite alternate}
+#beams .halo{animation:pulse 9s ease-in-out infinite alternate}
+@keyframes sweep{from{opacity:.30;transform:rotate(-1.1deg) scaleY(.97)}
+                 to  {opacity:.85;transform:rotate(1.1deg) scaleY(1.03)}}
+@keyframes pulse{from{opacity:.18}to{opacity:.42}}
+@media (prefers-reduced-motion:reduce){
+  #beams .ray,#beams .halo{animation:none}
+  #beams .ray{opacity:.5}
+}
+main,header,footer{position:relative;z-index:1}
+
+/* ---------- chrome ---------- */
+header.mast{border-bottom:1px solid var(--line);background:rgba(0,0,0,.72);backdrop-filter:blur(8px)}
+.mast .wrap{display:flex;align-items:center;justify-content:space-between;height:58px}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--ink)}
+.brand b{font-size:14px;letter-spacing:.30em;font-weight:800}
+.mast nav a{color:var(--dim);text-decoration:none;font-size:11px;letter-spacing:.20em;margin-left:18px}
+.mast nav a:hover,.mast nav a:focus-visible{color:var(--ink)}
+
+/* ---------- hero ---------- */
+.hero{padding:44px 0 10px}
+h1{margin:0;font-size:clamp(30px,7vw,52px);letter-spacing:.16em;font-weight:800;line-height:1.02}
+.tag{margin:12px 0 0;color:var(--dim);font-size:13px;letter-spacing:.06em;max-width:56ch;line-height:1.55}
+.place{margin:26px 0 0;font-size:12px;letter-spacing:.14em;color:var(--sun);word-break:break-word}
+.big{display:flex;flex-wrap:wrap;gap:26px 40px;margin:22px 0 0;padding:20px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.big div{min-width:96px}
+.big .k{display:block;font-size:10px;letter-spacing:.22em;color:var(--dim);margin-bottom:7px}
+.big .v{font-size:clamp(20px,4.6vw,30px);font-variant-numeric:tabular-nums;letter-spacing:.02em}
+
+/* ---------- controls ---------- */
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:24px 0 6px}
+input[type=text],input[type=date]{
+  background:#0e0e0e;border:1px solid var(--line);color:var(--ink);
+  border-radius:9px;padding:11px 13px;font-size:14px;font-family:inherit;min-width:0
+}
+input[type=text]{flex:1 1 260px}
+input:focus-visible,button:focus-visible,#sugg li:focus-visible{outline:2px solid var(--sun);outline-offset:2px}
+button{
+  background:#101010;border:1px solid var(--line);color:var(--ink);border-radius:9px;
+  padding:11px 15px;font-size:11px;letter-spacing:.16em;cursor:pointer;font-family:inherit
+}
+button:hover{border-color:#3a3a3a}
+button[aria-pressed=true]{background:var(--sun);color:#000;border-color:var(--sun);font-weight:700}
+.daynav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#sugg{list-style:none;margin:6px 0 0;padding:0;border:1px solid var(--line);border-radius:9px;background:#0b0b0b;max-height:260px;overflow:auto}
+#sugg:empty{display:none}
+#sugg li{padding:11px 13px;border-bottom:1px solid #151515;cursor:pointer;font-size:13px;color:#d4d4d4}
+#sugg li:last-child{border-bottom:0}
+#sugg li:hover{background:#161616;color:#fff}
+
+/* ---------- events ---------- */
+.sect{margin:30px 0 8px;font-size:10px;letter-spacing:.26em;color:var(--dim)}
+ul.ev{list-style:none;margin:0;padding:0}
+ul.ev li{display:grid;grid-template-columns:108px 1fr auto;gap:16px;align-items:baseline;
+  padding:13px 0;border-bottom:1px solid #131313}
+ul.ev li .t{font-variant-numeric:tabular-nums;font-size:16px;letter-spacing:.03em}
+ul.ev li .n{font-size:13px;color:#cfcfcf}
+ul.ev li .b{font-size:9px;letter-spacing:.2em;color:var(--dim)}
+li.sun .t{color:var(--sun)}
+li.moon .t{color:var(--moon)}
+li.none .t{color:#555;font-size:13px}
+.note{margin:16px 0 0;color:var(--dim);font-size:12px;line-height:1.6}
+.moonbar{display:flex;gap:26px;flex-wrap:wrap;margin:14px 0 0;padding:15px 0;border-top:1px solid var(--line)}
+.moonbar span{font-size:12px;color:var(--dim)}
+.moonbar b{color:var(--moon);font-weight:600}
+#err{margin:18px 0;padding:13px 15px;border:1px solid #4a1f1f;background:#170a0a;border-radius:9px;color:#ff8a8a;font-size:13px}
+#err:empty{display:none;margin:0;padding:0;border:0}
+footer{margin:56px 0 0;border-top:1px solid var(--line);padding:22px 0 40px}
+footer .wrap{display:flex;flex-wrap:wrap;gap:12px 20px;justify-content:space-between}
+footer a{color:var(--dim);text-decoration:none;font-size:10px;letter-spacing:.18em;margin-right:14px}
+footer a:hover{color:var(--ink)}
+footer p{margin:0;color:#4a4a4a;font-size:10px;letter-spacing:.14em}
+@media (max-width:640px){
+  ul.ev li{grid-template-columns:92px 1fr;gap:10px}
+  ul.ev li .b{grid-column:2;font-size:8px}
+  .big{gap:18px 26px}
+}
+</style>
+</head>
+<body>
+
+<svg id="beams" aria-hidden="true" preserveAspectRatio="xMidYMin slice" viewBox="0 0 1000 1000">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f2b544" stop-opacity=".50"/>
+      <stop offset="55%" stop-color="#c07a20" stop-opacity=".10"/>
+      <stop offset="100%" stop-color="#000" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="hg" cx="50%" cy="0%" r="62%">
+      <stop offset="0%" stop-color="#f2b544" stop-opacity=".40"/>
+      <stop offset="100%" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect class="halo" x="0" y="0" width="1000" height="1000" fill="url(#hg)"/>
+  <g id="rays" fill="url(#bg)"></g>
+</svg>
+
+<header class="mast">
+  <div class="wrap">
+    <a class="brand" href="https://puddystudios.com/"><b>PUDDY</b></a>
+    <nav aria-label="Puddy tools">
+      <a href="https://starmap.puddystudios.com/">STARMAP</a>
+      <a href="https://puddystudios.com/">STUDIOS</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <h1>SUNMAP</h1>
+    <p class="tag">Every solar and lunar moment of your day, solved to the second for your exact spot on the ground. Swiss Ephemeris on JPL DE441, computed on your device.</p>
+    <p class="place" id="place">Locating you...</p>
+
+    <div class="big">
+      <div><span class="k">SUNRISE</span><span class="v" id="b-rise">--:--:--</span></div>
+      <div><span class="k">SUNSET</span><span class="v" id="b-set">--:--:--</span></div>
+      <div><span class="k">DAY LENGTH</span><span class="v" id="b-len">--</span></div>
+    </div>
+  </section>
+
+  <div class="controls">
+    <input type="text" id="q" placeholder="Search any city or address" autocomplete="off"
+           aria-label="Search for a location" spellcheck="false">
+    <button id="gps" type="button">USE MY LOCATION</button>
+  </div>
+  <ul id="sugg" role="listbox" aria-label="Location results"></ul>
+
+  <div class="controls">
+    <div class="daynav">
+      <button id="prev" type="button" aria-label="Previous day">&#8592; PREV</button>
+      <input type="date" id="date" aria-label="Choose a date">
+      <button id="next" type="button" aria-label="Next day">NEXT &#8594;</button>
+      <button id="today" type="button">TODAY</button>
+    </div>
+    <button id="moont" type="button" aria-pressed="false">MOON</button>
+  </div>
+
+  <div id="err" role="alert"></div>
+
+  <h2 class="sect">THE DAY</h2>
+  <ul class="ev" id="list"><li class="none"><span class="t">...</span><span class="n">Computing on your device</span></li></ul>
+
+  <div class="moonbar" id="moonbar" hidden>
+    <span>Moon illumination <b id="m-illum">-</b></span>
+    <span>Phase angle <b id="m-phase">-</b></span>
+  </div>
+
+  <p class="note">
+    Times are topocentric: they are true for your coordinates and altitude, not for a city centre.
+    Where the Sun or Moon does not rise or set at all, SUNMAP says so rather than inventing a time.
+  </p>
+</main>
+
+<footer>
+  <div class="wrap">
+    <nav aria-label="Footer">
+      <a href="https://puddystudios.com/about">ABOUT</a>
+      <a href="https://puddystudios.com/contact">CONTACT</a>
+      <a href="https://puddystudios.com/privacy">PRIVACY</a>
+      <a href="https://puddystudios.com/terms">TERMS</a>
+      <a href="https://starmap.puddystudios.com/">STARMAP</a>
+    </nav>
+    <p>&copy; 2026 PUDDY INC. - ALL RIGHTS RESERVED</p>
+  </div>
+</footer>
+
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebApplication","name":"SUNMAP",
+"url":"https://sunmap.puddystudios.com/","applicationCategory":"ReferenceApplication",
+"operatingSystem":"Any","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},
+"description":"Sunrise, sunset, solar noon, the full twilight ladder, golden hour, and the Moon - solved to the second for any location with the Swiss Ephemeris, computed on-device.",
+"publisher":{"@type":"Organization","name":"PUDDY Inc.","url":"https://puddystudios.com/"}}
+</script>
+
+<script type="module">
+'use strict';
+const $ = (id) => document.getElementById(id);
+
+/* ---------- beams geometry, generated not hand-drawn ---------- */
+(function beams(){
+  const g = $('rays'); if (!g) return;
+  const N = 21, OX = 500, OY = -40, SVGNS = 'http://www.w3.org/2000/svg';
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < N; i++) {
+    const t = i / (N - 1);
+    const ang = (-64 + t * 128) + Math.sin(i * 2.399) * 3.4;   // degrees off vertical
+    const halfW = 3.0 + ((i * 37) % 11) * 0.62;
+    const len = 1180 + ((i * 53) % 17) * 26;
+    const r = (d) => d * Math.PI / 180;
+    const x1 = OX + Math.sin(r(ang - halfW)) * len, y1 = OY + Math.cos(r(ang - halfW)) * len;
+    const x2 = OX + Math.sin(r(ang + halfW)) * len, y2 = OY + Math.cos(r(ang + halfW)) * len;
+    const poly = document.createElementNS(SVGNS, 'polygon');
+    poly.setAttribute('class', 'ray');
+    poly.setAttribute('points', `${OX},${OY} ${x1.toFixed(1)},${y1.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}`);
+    poly.setAttribute('opacity', (0.30 + 0.70 * (1 - Math.abs(t - 0.5) * 2)).toFixed(3));
+    poly.style.animationDelay = (i * 0.41).toFixed(2) + 's';
+    poly.style.animationDuration = (14 + (i % 5) * 1.7).toFixed(1) + 's';
+    frag.appendChild(poly);
+  }
+  g.appendChild(frag);
+})();
+
+/* ---------- location: keyless, cached, GPS then IP then search ---------- */
+const LS_GEO = 'sunmap.geo', LS_CACHE = 'sunmap.geocache', LS_MOON = 'sunmap.moon';
+const TTL = 7 * 864e5, CAP = 400;
+const browserTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return 'UTC'; } };
+
+function cacheGet(k){ try{ const c=JSON.parse(localStorage.getItem(LS_CACHE)||'{}'); const e=c[k];
+  if(e && Date.now()-e.t < TTL) return e.v; }catch{} return null; }
+function cachePut(k,v){ try{ const c=JSON.parse(localStorage.getItem(LS_CACHE)||'{}');
+  c[k]={t:Date.now(),v}; const ks=Object.keys(c); if(ks.length>CAP) delete c[ks[0]];
+  localStorage.setItem(LS_CACHE, JSON.stringify(c)); }catch{} }
+const storedGeo = () => { try{ return JSON.parse(localStorage.getItem(LS_GEO)||'null'); }catch{ return null; } };
+const saveGeo = (g) => { try{ localStorage.setItem(LS_GEO, JSON.stringify(g)); }catch{} };
+
+async function photon(q){
+  const b = storedGeo();
+  const bias = b ? `&lat=${b.lat}&lon=${b.lon}` : '';
+  const r = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=6${bias}`);
+  if(!r.ok) throw new Error('photon ' + r.status);
+  const j = await r.json();
+  return (j.features||[]).map(f=>{
+    const p=f.properties||{}, c=(f.geometry||{}).coordinates||[];
+    const label=[p.name,(p.city&&p.city!==p.name)?p.city:null,p.state,p.country].filter(Boolean).join(', ');
+    return {label, lat:c[1], lon:c[0]};
+  }).filter(x=>typeof x.label==='string' && x.label && typeof x.lat==='number' && typeof x.lon==='number');
+}
+async function nominatim(q){
+  const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=6&q=${encodeURIComponent(q)}`);
+  if(!r.ok) throw new Error('nominatim ' + r.status);
+  const j = await r.json();
+  return (j||[]).map(x=>({label:x.display_name, lat:+x.lat, lon:+x.lon}))
+                .filter(x=>typeof x.label==='string' && x.label && isFinite(x.lat) && isFinite(x.lon));
+}
+async function suggest(q){
+  const key = 'q:'+q.toLowerCase();
+  const hit = cacheGet(key); if(hit) return hit;
+  let res=[];
+  try { res = await photon(q); } catch { res = []; }
+  if(!res.length){ try { res = await nominatim(q); } catch { res = []; } }
+  if(res.length) cachePut(key,res);
+  return res;
+}
+async function ipLocate(){
+  for (const u of ['https://get.geojs.io/v1/ip/geo.json','https://ipinfo.io/json']) {
+    try{
+      const r = await fetch(u); if(!r.ok) continue;
+      const j = await r.json();
+      let lat, lon;
+      if (j.loc) { const p=String(j.loc).split(','); lat=+p[0]; lon=+p[1]; }
+      else { lat=+j.latitude; lon=+j.longitude; }
+      if(isFinite(lat)&&isFinite(lon))
+        return {lat,lon,alt:0,tz:j.timezone||browserTz(),
+                label:[j.city,j.region,j.country||j.country_name].filter(Boolean).join(', ')||'Your area',
+                source:'ip'};
+    }catch{}
+  }
+  return null;
+}
+
+/* ---------- state ---------- */
+let GEO = storedGeo() || {lat:34.0522, lon:-118.2437, alt:0, tz:'America/Los_Angeles',
+                          label:'Los Angeles, California, United States', source:'default'};
+let DATE = null, SHOW_MOON = localStorage.getItem(LS_MOON) === '1';
+
+const worker = new Worker('sunmap-worker.js', {type:'module'});
+const pad = (n)=>String(n).padStart(2,'0');
+const todayIn = (tz)=> new Intl.DateTimeFormat('en-CA',
+  {timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+function fmtLen(s){ if(s==null) return '--'; const h=Math.floor(s/3600), m=Math.floor(s%3600/60); return `${h}h ${pad(m)}m`; }
+const timeOf = (e)=> e.local ? e.local.slice(11,19) : null;
+
+/* Rows are built with DOM + textContent, never innerHTML: event labels and
+   status strings originate outside this file (the engine, and geocoder data
+   flows into the same rendering path), so string interpolation is unsafe. */
+function row(cls, timeText, nameText, badgeText){
+  const li = document.createElement('li');
+  li.className = cls;
+  const t = document.createElement('span'); t.className='t'; t.textContent = timeText;
+  const n = document.createElement('span'); n.className='n'; n.textContent = nameText;
+  li.append(t, n);
+  if(badgeText){ const b=document.createElement('span'); b.className='b'; b.textContent=badgeText; li.append(b); }
+  return li;
+}
+
+function render(res){
+  $('place').textContent =
+    `${GEO.label}  -  ${GEO.lat.toFixed(4)}, ${GEO.lon.toFixed(4)}  -  ${res.tz}`;
+  const by = Object.fromEntries(res.events.map(e=>[e.key,e]));
+  $('b-rise').textContent = (by.sunrise && timeOf(by.sunrise)) || '--';
+  $('b-set').textContent  = (by.sunset  && timeOf(by.sunset))  || '--';
+  $('b-len').textContent  = fmtLen(res.day_length_s);
+
+  const rows = res.events.filter(e => SHOW_MOON || e.body === 'sun');
+  const list = $('list');
+  list.textContent = '';
+  if(!rows.length){ list.append(row('none','--','No events for this day','')); }
+  else rows.forEach(e=>{
+    list.append(e.local
+      ? row(e.body, timeOf(e), e.label, e.body.toUpperCase())
+      : row('none', 'none', e.label, e.status));
+  });
+
+  const mb = $('moonbar');
+  if(SHOW_MOON && res.moon){
+    mb.hidden=false;
+    $('m-illum').textContent = res.moon.illumination_pct.toFixed(1)+'%';
+    $('m-phase').textContent = res.moon.phase_angle_deg.toFixed(1)+' deg';
+  } else mb.hidden = true;
+}
+
+function compute(){
+  $('err').textContent='';
+  worker.postMessage({base:'./', coords:{lat:GEO.lat,lon:GEO.lon,alt:GEO.alt||0},
+                      date:DATE, tz:GEO.tz, moon:true});
+}
+worker.onmessage = (ev)=>{
+  const d = ev.data;
+  if(!d || !d.ok){ $('err').textContent = 'Engine error: ' + ((d&&d.error)||'unknown'); return; }
+  render(d.result);
+};
+worker.onerror = (e)=>{ $('err').textContent = 'Worker failed to load: ' + (e.message||'unknown'); };
+
+function setGeo(g){ GEO=g; saveGeo(g); DATE = todayIn(g.tz); $('date').value = DATE; compute(); }
+function shiftDay(n){
+  const [y,m,d]=DATE.split('-').map(Number);
+  const t=new Date(Date.UTC(y,m-1,d)); t.setUTCDate(t.getUTCDate()+n);
+  DATE = `${t.getUTCFullYear()}-${pad(t.getUTCMonth()+1)}-${pad(t.getUTCDate())}`;
+  $('date').value=DATE; compute();
+}
+
+/* ---------- wiring ---------- */
+$('prev').onclick = ()=>shiftDay(-1);
+$('next').onclick = ()=>shiftDay(1);
+$('today').onclick= ()=>{ DATE=todayIn(GEO.tz); $('date').value=DATE; compute(); };
+$('date').onchange= (e)=>{ if(e.target.value){ DATE=e.target.value; compute(); } };
+$('moont').onclick= ()=>{ SHOW_MOON=!SHOW_MOON; localStorage.setItem(LS_MOON, SHOW_MOON?'1':'0');
+  $('moont').setAttribute('aria-pressed', String(SHOW_MOON)); compute(); };
+$('moont').setAttribute('aria-pressed', String(SHOW_MOON));
+
+let deb;
+$('q').addEventListener('input', (e)=>{
+  const q=e.target.value.trim(); clearTimeout(deb);
+  const box = $('sugg');
+  if(q.length<3){ box.textContent=''; return; }
+  deb=setTimeout(async ()=>{
+    const res = await suggest(q);
+    box.textContent = '';
+    res.forEach((r)=>{
+      const li = document.createElement('li');
+      li.setAttribute('role','option');
+      li.tabIndex = 0;
+      li.textContent = r.label;              // untrusted geocoder text, never parsed as HTML
+      const pick = ()=>{
+        setGeo({lat:r.lat, lon:r.lon, alt:0, tz:GEO.tz, label:r.label, source:'search'});
+        box.textContent=''; $('q').value='';
+      };
+      li.onclick = pick;
+      li.onkeydown = (ev)=>{ if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); pick(); } };
+      box.appendChild(li);
+    });
+  }, 250);
+});
+
+$('gps').onclick = ()=>{
+  $('place').textContent='Locating...';
+  if(!navigator.geolocation){ ipFallback(); return; }
+  navigator.geolocation.getCurrentPosition(
+    (p)=>setGeo({lat:p.coords.latitude, lon:p.coords.longitude,
+                 alt:p.coords.altitude||0, tz:browserTz(),
+                 label:'Your location', source:'gps'}),
+    ()=>ipFallback(), {enableHighAccuracy:true, timeout:9000, maximumAge:60000});
+};
+async function ipFallback(){
+  const g = await ipLocate();
+  if(g) setGeo(g);
+  else { $('err').textContent='Could not determine your location. Search for a place above.';
+         $('place').textContent = GEO.label; }
+}
+
+/* ---------- boot ---------- */
+DATE = todayIn(GEO.tz);
+$('date').value = DATE;
+compute();
+if(!storedGeo()){ ipLocate().then(g=>{ if(g && !storedGeo()) setGeo(g); }); }
+</script>
+</body>
+</html>
