@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local-preview chrome copies (deployed, not source of truth)
+/puddy-tools.js
+/puddy-logo.svg
