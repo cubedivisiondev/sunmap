@@ -1,43 +1,116 @@
-<!DOCTYPE html>
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 PUDDY Inc. <legal@puddystudios.com>
+"""Render the Sunmap shell (one page) + PWA files.
+
+A LITERAL FORK of star_map/scripts/render.py. The page skeleton, the entire
+<style> block, the three-column event row, the controls panel, the crest, the
+countdown card, the FAQ, the JSON-LD, the PWA emission and the --base/--site
+flag handling are STARMAP's, unchanged. Only the VALUES differ: STARMAP lists a
+year of geocentric ingresses, SUNMAP lists one day of topocentric solar and
+lunar events for the observer standing there.
+
+Computed parts injected per page: __SIGIL_BODY__ (21-node radiant sun),
+__PRERENDER_LIST__ (crawlable day ladder), __FAQ_HTML__, __JSONLD__, day nav,
+and the engine-derived ladder tables the page script reads.
+
+Mount point is baked at render time via --base ('/' for the sunmap subdomains).
+--site sets the canonical/OG origin (always the PROD home; dev stays noindex
+via the CloudFront header).
+
+Also emits manifest.json, sw.js, sitemap.xml, robots.txt, 404.html and
+source.html (the AGPL-3.0 corresponding-source offer the worker header points
+at - serving the page without it is a licence violation, not a nicety).
+
+WHERE THE DATA COMES FROM
+  build time  scripts/solar.py  -> the prerendered crawlable ladder + the FAQ,
+              computed for the DEFAULT observer (New York City, the tzdata
+              principal point sunmap-geo.js also defaults to) on --date.
+  run time    sunmap-worker.js  -> the same JSON shape, recomputed on the
+              device for the visitor's own coordinates, elevation and day.
+  The two are interchangeable by contract, so the JS list hydrates straight
+  over the prerendered one.
+
+CORRECTNESS
+  An event that does not occur carries no time. It renders an honest
+  "None - ..." with the reason. No time is ever invented, at build time or in
+  the browser.
+
+ONE DELIBERATE DEPARTURE FROM THE PARENT
+  STARMAP assembles its list, chips and note bar with innerHTML. SUNMAP builds
+  the IDENTICAL markup with createElement + textContent, because its data layer
+  carries third-party text: sunmap-geo.js states in its own contract that place
+  names originate in OpenStreetMap, are user-editable, and must be rendered with
+  textContent. Same classes, same nesting, same rendered DOM - safer
+  construction.
+
+Usage:
+  python3 render.py                                    # today, dev mount
+  python3 render.py --date 2026-12-21                  # a specific day
+  python3 render.py --base / --site https://sunmap.puddystudios.com/
+"""
+import argparse
+import math
+import sys
+from pathlib import Path
+
+SUN = Path(__file__).resolve().parents[1]
+
+_ap = argparse.ArgumentParser()
+_ap.add_argument('--base', default='/', help="URL mount: '/' (the sunmap subdomains - canonical) or a subpath")
+_ap.add_argument('--site', default='https://sunmap.puddystudios.com/', help='canonical origin+base for SEO tags')
+_ap.add_argument('--og-site', default=None, help='host for OG/social images + JSON-LD image (defaults to --site); point at the dev host so dev link previews resolve while prod is dark')
+_ap.add_argument('--years', default='1900-2099', help='inclusive year range the day picker offers')
+_ap.add_argument('--date', default=None, help='the local day to prerender (YYYY-MM-DD); defaults to today at the default observer')
+_args = _ap.parse_args()
+
+BASE = _args.base if _args.base.endswith('/') else _args.base + '/'
+SITE = _args.site if _args.site.endswith('/') else _args.site + '/'
+OG_SITE = (_args.og_site or _args.site)
+OG_SITE = OG_SITE if OG_SITE.endswith('/') else OG_SITE + '/'
+_y0, _y1 = (int(p) for p in _args.years.split('-'))
+YEARS = list(range(_y0, _y1 + 1))
+
+HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script>(function(){var u=new URL(window.location.href);['_gl','_ga','_gac','gclid','gclsrc'].forEach(function(p){u.searchParams.delete(p);});if(u.href!==window.location.href)window.history.replaceState(null,'',u.pathname+(u.search||'')+(u.hash||''));})();</script>
-<title>SUNMAP | Sunrise, Sunset and Twilight - Timed to the Second</title>
-<meta name="description" content="Sunrise, sunset, all three twilights, both golden hours and the Moon, solved to the second for exactly where you stand. August 10, 2026 at New York City: sunrise 6:01 AM, sunset 8:00 PM, 13h 59m of daylight.">
-<meta name="keywords" content="sunrise time, sunset time, golden hour calculator, blue hour, civil twilight, nautical twilight, astronomical twilight, moonrise time, moonset time, solar noon, day length calculator, sunrise sunset by location">
+<title>__TITLE__</title>
+<meta name="description" content="__DESC__">
+<meta name="keywords" content="__KEYWORDS__">
 <meta name="author" content="Colton Dempsey 𓅇">
-<link rel="canonical" href="https://sunmap.puddy.dev/">
+<link rel="canonical" href="__CANONICAL__">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Puddy Studios">
-<meta property="og:title" content="SUNMAP | Sunrise, Sunset and Twilight - Timed to the Second">
-<meta property="og:description" content="The whole solar and lunar day to the second, topocentric to where you stand - sunrise 6:01 AM, sunset 8:00 PM, 13h 59m of daylight">
-<meta property="og:url" content="https://sunmap.puddy.dev/">
-<meta property="og:image" content="https://sunmap.puddy.dev/og/sunmap-og.png">
+<meta property="og:title" content="__OGTITLE__">
+<meta property="og:description" content="__OGDESC__">
+<meta property="og:url" content="__PAGEURL__">
+<meta property="og:image" content="__OGIMG__">
 <meta property="og:image:width" content="2400">
 <meta property="og:image:height" content="1260">
-<meta property="og:image:alt" content="SUNMAP: Sunrise, Sunset and Twilight to the Second - Puddy Studios social card">
+<meta property="og:image:alt" content="__OGALT__">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:site" content="@cubedivision">
-<meta name="twitter:title" content="SUNMAP | Sunrise, Sunset and Twilight - Timed to the Second">
-<meta name="twitter:description" content="The whole solar and lunar day to the second, topocentric to where you stand - sunrise 6:01 AM, sunset 8:00 PM, 13h 59m of daylight">
-<meta name="twitter:image" content="https://sunmap.puddy.dev/og/sunmap-og.png">
-<meta name="twitter:image:alt" content="SUNMAP: Sunrise, Sunset and Twilight to the Second - Puddy Studios social card">
-
-<link rel="manifest" href="/manifest.json">
+<meta name="twitter:title" content="__TWTITLE__">
+<meta name="twitter:description" content="__OGDESC__">
+<meta name="twitter:image" content="__OGIMG__">
+<meta name="twitter:image:alt" content="__OGALT__">
+__PREVNEXT_LINKS__
+<link rel="manifest" href="__B__manifest.json">
 <meta name="theme-color" content="#000000">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="Sunmap">
-<link rel="apple-touch-icon" href="/icons/icon-180.png">
-<link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg">
-<link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png">
-<link rel="icon" type="image/png" sizes="16x16" href="/icons/icon-16.png">
-<link rel="icon" type="image/x-icon" href="/favicon.ico">
-<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
-<script type="application/ld+json">{"@context": "https://schema.org", "@graph": [{"@type": "WebSite", "@id": "https://puddystudios.com/#website", "url": "https://puddystudios.com/", "name": "Puddy Studios", "publisher": {"@id": "https://puddystudios.com/#org"}}, {"@type": "Organization", "@id": "https://puddystudios.com/#org", "name": "Puddy Studios", "url": "https://puddystudios.com/", "logo": "https://puddystudios.com/puddy-logo.svg"}, {"@type": "ImageObject", "@id": "https://sunmap.puddy.dev/#primaryimage", "url": "https://sunmap.puddy.dev/og/sunmap-og.png", "contentUrl": "https://sunmap.puddy.dev/og/sunmap-og.png", "width": 2400, "height": 1260, "caption": "SUNMAP: Sunrise, Sunset and Twilight to the Second - Puddy Studios"}, {"@type": ["WebPage", "CollectionPage"], "@id": "https://sunmap.puddy.dev/#webpage", "url": "https://sunmap.puddy.dev/", "name": "SUNMAP | Sunrise, Sunset and Twilight - Timed to the Second", "isPartOf": {"@id": "https://puddystudios.com/#website"}, "primaryImageOfPage": {"@id": "https://sunmap.puddy.dev/#primaryimage"}, "image": {"@id": "https://sunmap.puddy.dev/#primaryimage"}, "dateModified": "2026-08-10", "description": "The whole solar and lunar day timed to the second on the Swiss Ephemeris engine, topocentric to the observer.", "about": ["Sunrise", "Sunset", "Twilight", "Golden hour", "Moonrise", "Solar noon", "Day length"], "breadcrumb": {"@id": "https://sunmap.puddy.dev/#breadcrumb"}}, {"@type": "BreadcrumbList", "@id": "https://sunmap.puddy.dev/#breadcrumb", "itemListElement": [{"@type": "ListItem", "position": 1, "name": "Puddy Studios", "item": "https://puddystudios.com/"}, {"@type": "ListItem", "position": 2, "name": "Sunmap", "item": "https://sunmap.puddy.dev/"}]}, {"@type": "Dataset", "@id": "https://sunmap.puddy.dev/#dataset", "name": "The Solar and Lunar Day - Second Precision", "description": "Sunrise, sunset, astronomical, nautical and civil twilight, both golden hours, solar noon and solar midnight, moonrise, moonset, lunar noon and lunar midnight - solved to the second from the Swiss Ephemeris (DE441), topocentrically for the observer, and cross-checked against an independent NOAA-algorithm implementation.", "url": "https://sunmap.puddy.dev/", "image": "https://sunmap.puddy.dev/og/sunmap-og.png", "keywords": ["sunrise", "sunset", "twilight", "golden hour", "moonrise", "moonset", "solar noon", "day length"], "temporalCoverage": "2026-08-10/2026-08-10", "spatialCoverage": {"@type": "Place", "name": "New York City", "geo": {"@type": "GeoCoordinates", "latitude": 40.7142, "longitude": -74.0064}}, "creator": {"@id": "https://puddystudios.com/#org"}, "measurementTechnique": "Swiss Ephemeris DE441 swe_rise_trans, topocentric; independent NOAA-algorithm cross-check", "license": "https://puddystudios.com/terms", "variableMeasured": "Topocentric altitude threshold crossing times of the Sun and Moon"}, {"@type": "WebApplication", "@id": "https://sunmap.puddy.dev/#app", "name": "SUNMAP", "url": "https://sunmap.puddy.dev/", "image": "https://sunmap.puddy.dev/og/sunmap-og.png", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Any", "browserRequirements": "Requires JavaScript", "description": "The whole solar and lunar day - sunrise, sunset, twilight, golden hour and the Moon - solved to the second on your own device for exactly where you stand. Installable and offline-capable.", "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}}, {"@type": "FAQPage", "@id": "https://sunmap.puddy.dev/#faq", "mainEntity": [{"@type": "Question", "name": "What time is sunrise and sunset in New York City on August 10, 2026?", "acceptedAnswer": {"@type": "Answer", "text": "Sunrise falls on August 10, 2026 at 6:01:17 AM EDT and sunset on August 10, 2026 at 8:00:48 PM EDT. That is a day 13 hours 59 minutes 32 seconds long."}}, {"@type": "Question", "name": "When is golden hour on August 10, 2026?", "acceptedAnswer": {"@type": "Answer", "text": "Morning golden hour runs from August 10, 2026 at 5:43:22 AM EDT to August 10, 2026 at 6:39:33 AM EDT. Evening golden hour runs from August 10, 2026 at 7:22:39 PM EDT to August 10, 2026 at 8:18:40 PM EDT. Golden hour is bounded by the Sun centre passing 4 degrees below and 6 degrees above the horizon, so it moves with your latitude and the season, not by a fixed hour."}}, {"@type": "Question", "name": "When does it get fully dark on August 10, 2026?", "acceptedAnswer": {"@type": "Answer", "text": "Astronomical dusk falls on August 10, 2026 at 9:45:55 PM EDT, and astronomical dawn on August 10, 2026 at 4:15:38 AM EDT. Full astronomical night is the Sun centre 18 degrees below the horizon, the point at which sunlight stops contributing to the sky at all. The dusk closes this day and the dawn opened it."}}, {"@type": "Question", "name": "What is the Moon doing on August 10, 2026?", "acceptedAnswer": {"@type": "Answer", "text": "The Moon is 6.1 percent illuminated and 2006.3 arcseconds across. It rises on August 10, 2026 at 3:04:23 AM EDT and sets on August 10, 2026 at 6:55:16 PM EDT."}}, {"@type": "Question", "name": "How accurate are these sunrise and sunset times?", "acceptedAnswer": {"@type": "Answer", "text": "Every instant is computed with the Swiss Ephemeris (DE441) on the JPL DE441 ephemerides and resolved to the second, topocentrically, for a specific latitude, longitude and elevation. An independent NOAA-algorithm implementation verifies the ladder event by event. The remaining uncertainty is not in the arithmetic, it is in the air: standard refraction at the horizon is 34 arcminutes and real atmosphere departs from it, so an observed sunrise against a real horizon can differ from any computed one by a few tens of seconds. Every other almanac rounds to the minute and hides that. SUNMAP prints the second and names the limit."}}]}]}</script>
+<link rel="apple-touch-icon" href="__B__icons/icon-180.png">
+<link rel="icon" type="image/svg+xml" sizes="any" href="__B__favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="__B__icons/icon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="__B__icons/icon-16.png">
+<link rel="icon" type="image/x-icon" href="__B__favicon.ico">
+<link rel="icon" type="image/png" sizes="192x192" href="__B__icons/icon-192.png">
+__JSONLD__
 <link rel="dns-prefetch" href="https://photon.komoot.io">
 <link rel="dns-prefetch" href="https://nominatim.openstreetmap.org">
 <link rel="dns-prefetch" href="https://get.geojs.io">
@@ -247,7 +320,7 @@
   <canvas id="stars" aria-hidden="true"></canvas>
   <div class="wrap">
     <div class="crest">
-      <h1><a class="wm" href="/" aria-label="SUNMAP home - today's solar and lunar cycle">Sunmap</a></h1>
+      <h1><a class="wm" href="__B__" aria-label="SUNMAP home - today's solar and lunar cycle">Sunmap</a>__H1YR__</h1>
       <svg class="sigil" viewBox="0 0 200 200" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
         <defs>
           <symbol id="puddy-face" viewBox="0 0 38.4 38.4">
@@ -259,10 +332,10 @@
             <rect fill="#fff" x="26.29" y="10.36" width="1.94" height="2.8" transform="translate(-.02 .06) rotate(-.12)"/>
           </symbol>
         </defs>
-        <circle cx="100" cy="100" r="92" fill="none" stroke="#fff" stroke-width="1" opacity="0.4"/><circle cx="100" cy="100" r="64" fill="none" stroke="#fff" stroke-width="1" opacity="0.4"/><circle cx="100" cy="100" r="30" fill="none" stroke="#fff" stroke-width="1" opacity="0.4"/><line x1="109.27" y1="71.47" x2="119.78" y2="39.13" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="124.27" y1="82.37" x2="151.78" y2="62.38" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="130.00" y1="100.00" x2="164.00" y2="100.00" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="124.27" y1="117.63" x2="151.78" y2="137.62" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="109.27" y1="128.53" x2="119.78" y2="160.87" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="90.73" y1="128.53" x2="80.22" y2="160.87" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="75.73" y1="117.63" x2="48.22" y2="137.62" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="70.00" y1="100.00" x2="36.00" y2="100.00" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="75.73" y1="82.37" x2="48.22" y2="62.38" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="90.73" y1="71.47" x2="80.22" y2="39.13" stroke="#fff" stroke-width="1.5" opacity="0.55"/><line x1="100.00" y1="100.00" x2="100.00" y2="56.00" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="100.00" x2="125.86" y2="64.40" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="100.00" x2="141.85" y2="86.40" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="100.00" x2="141.85" y2="113.60" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="100.00" x2="125.86" y2="135.60" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="100.00" x2="100.00" y2="144.00" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="100.00" x2="74.14" y2="135.60" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="100.00" x2="58.15" y2="113.60" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="100.00" x2="58.15" y2="86.40" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="100.00" x2="74.14" y2="64.40" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="56.00" x2="100.00" y2="14.00" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="125.86" y1="64.40" x2="150.55" y2="30.42" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="141.85" y1="86.40" x2="181.79" y2="73.42" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="141.85" y1="113.60" x2="181.79" y2="126.58" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="125.86" y1="135.60" x2="150.55" y2="169.58" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="144.00" x2="100.00" y2="186.00" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="74.14" y1="135.60" x2="49.45" y2="169.58" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="58.15" y1="113.60" x2="18.21" y2="126.58" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="58.15" y1="86.40" x2="18.21" y2="73.42" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="74.14" y1="64.40" x2="49.45" y2="30.42" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="56.00" x2="141.85" y2="113.60" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="125.86" y1="64.40" x2="125.86" y2="135.60" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="141.85" y1="86.40" x2="100.00" y2="144.00" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="141.85" y1="113.60" x2="74.14" y2="135.60" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="125.86" y1="135.60" x2="58.15" y2="113.60" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="100.00" y1="144.00" x2="58.15" y2="86.40" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="74.14" y1="135.60" x2="74.14" y2="64.40" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="58.15" y1="113.60" x2="100.00" y2="56.00" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="58.15" y1="86.40" x2="125.86" y2="64.40" stroke="#fff" stroke-width="1.5" opacity="0.8"/><line x1="74.14" y1="64.40" x2="141.85" y2="86.40" stroke="#fff" stroke-width="1.5" opacity="0.8"/><use href="#puddy-face" x="93.00" y="93.00" width="14" height="14"/><use href="#puddy-face" x="93.00" y="49.00" width="14" height="14"/><use href="#puddy-face" x="118.86" y="57.40" width="14" height="14"/><use href="#puddy-face" x="134.85" y="79.40" width="14" height="14"/><use href="#puddy-face" x="134.85" y="106.60" width="14" height="14"/><use href="#puddy-face" x="118.86" y="128.60" width="14" height="14"/><use href="#puddy-face" x="93.00" y="137.00" width="14" height="14"/><use href="#puddy-face" x="67.14" y="128.60" width="14" height="14"/><use href="#puddy-face" x="51.15" y="106.60" width="14" height="14"/><use href="#puddy-face" x="51.15" y="79.40" width="14" height="14"/><use href="#puddy-face" x="67.14" y="57.40" width="14" height="14"/><use href="#puddy-face" x="93.00" y="7.00" width="14" height="14"/><use href="#puddy-face" x="143.55" y="23.42" width="14" height="14"/><use href="#puddy-face" x="174.79" y="66.42" width="14" height="14"/><use href="#puddy-face" x="174.79" y="119.58" width="14" height="14"/><use href="#puddy-face" x="143.55" y="162.58" width="14" height="14"/><use href="#puddy-face" x="93.00" y="179.00" width="14" height="14"/><use href="#puddy-face" x="42.45" y="162.58" width="14" height="14"/><use href="#puddy-face" x="11.21" y="119.58" width="14" height="14"/><use href="#puddy-face" x="11.21" y="66.42" width="14" height="14"/><use href="#puddy-face" x="42.45" y="23.42" width="14" height="14"/>
+        __SIGIL_BODY__
       </svg>
       <h2 class="subtitle"><span>Every Sunrise and Sunset</span> <span>Solved Where You Stand</span></h2>
-      <nav class="yearnav" aria-label="Browse days"><div class="yn-select"><button id="yn-open" type="button" aria-haspopup="dialog">Select day</button></div><div class="yn-spread"><a href="#d=2026-08-09" id="day-prev" rel="prev">&laquo; Prev</a><span class="ynow" id="day-now">Monday, August 10</span><a href="#d=2026-08-11" id="day-next" rel="next">Next &raquo;</a></div><div class="yn-day"><button type="button" id="day-input" class="day-box empty" aria-haspopup="dialog" aria-expanded="false" aria-label="Pick a date from 1900 to 2099 - scroll the month, day and year wheels">PICK A DATE</button><div id="day-cal" hidden role="dialog" aria-label="Pick a day"><div class="dc-wheels"><div class="dc-col" id="dc-mon" role="listbox" aria-label="Month"></div><div class="dc-col" id="dc-day" role="listbox" aria-label="Day"></div><div class="dc-col" id="dc-yr" role="listbox" aria-label="Year"></div><div class="dc-band" aria-hidden="true"></div></div><button type="button" id="dc-go">Go to day</button></div></div></nav>
+      <nav class="yearnav" aria-label="Browse days">__YEARNAV__</nav>
     </div>
     <div class="next" id="next">
       <div><div class="lbl">Next event</div><div class="name" id="next-name">-</div><div class="when" id="next-when">-</div></div>
@@ -297,27 +370,27 @@
   </div>
 </div></nav>
 
-<main class="wrap"><div class="status" id="status">Loading...</div><div id="list"><p class="seo-lead">On Monday, August 10, 2026 the Sun rises over New York City at 6:01:17 AM EDT and sets at 8:00:48 PM EDT. That is a day 13 hours 59 minutes 32 seconds long. Golden hour runs 5:43 AM to 6:39 AM in the morning and 7:22 PM to 8:18 PM in the evening. Full astronomical night begins at 9:45:55 PM EDT. The Moon rises at 3:04:23 AM EDT and sets at 6:55:16 PM EDT, 6.1 percent illuminated. Every twilight, golden hour, transit, moonrise and moonset below is solved to the second with the Swiss Ephemeris (DE441) for New York City - Choose your own location on the page and the whole ladder recomputes on your device, for your latitude, longitude, elevation and day.</p><h2>Monday, August 10, 2026 - New York City</h2><ul><li><time datetime="2026-08-10T05:01:26.997000Z">1:01:27 AM EDT</time> ☉ Solar midnight</li><li><time datetime="2026-08-10T07:04:22.700000Z">3:04:23 AM EDT</time> ☽ Moonrise</li><li><time datetime="2026-08-10T08:15:37.898000Z">4:15:38 AM EDT</time> ☉ Astronomical dawn</li><li><time datetime="2026-08-10T08:55:11.302000Z">4:55:11 AM EDT</time> ☉ Nautical dawn</li><li><time datetime="2026-08-10T09:31:39.848000Z">5:31:40 AM EDT</time> ☉ Civil dawn</li><li><time datetime="2026-08-10T09:43:21.544000Z">5:43:22 AM EDT</time> ☉ Golden hour begins</li><li><time datetime="2026-08-10T10:01:16.686000Z">6:01:17 AM EDT</time> ☉ Sunrise</li><li><time datetime="2026-08-10T10:39:32.809000Z">6:39:33 AM EDT</time> ☉ Golden hour ends</li><li><time datetime="2026-08-10T15:04:59.553000Z">11:05:00 AM EDT</time> ☽ Lunar noon</li><li><time datetime="2026-08-10T17:01:22.499000Z">1:01:22 PM EDT</time> ☉ Solar noon</li><li><time datetime="2026-08-10T22:55:15.650000Z">6:55:16 PM EDT</time> ☽ Moonset</li><li><time datetime="2026-08-10T23:22:38.757000Z">7:22:39 PM EDT</time> ☉ Golden hour begins</li><li><time datetime="2026-08-11T00:00:48.491000Z">8:00:48 PM EDT</time> ☉ Sunset</li><li><time datetime="2026-08-11T00:18:39.970000Z">8:18:40 PM EDT</time> ☉ Golden hour ends</li><li><time datetime="2026-08-11T00:30:19.002000Z">8:30:19 PM EDT</time> ☉ Civil dusk</li><li><time datetime="2026-08-11T01:06:37.440000Z">9:06:37 PM EDT</time> ☉ Nautical dusk</li><li><time datetime="2026-08-11T01:45:55.408000Z">9:45:55 PM EDT</time> ☉ Astronomical dusk</li><li><time datetime="2026-08-11T03:35:44.033000Z">11:35:44 PM EDT</time> ☽ Lunar midnight</li></ul></div></main>
-<section class="wrap yeardir" aria-label="Browse every day of the month"><h2 id="years">Browse Every Day of August 2026</h2><p class="lead">Every day is solved live on your device, for wherever you are standing - Sunrise, sunset, all three twilights, both golden hours, solar noon and midnight, and the Moon. Pick a day, or step with the arrows above.</p><div class="decade">August 2026</div><div class="ygrid" id="day-dir"><a href="#d=2026-08-01">1</a><a href="#d=2026-08-02">2</a><a href="#d=2026-08-03">3</a><a href="#d=2026-08-04">4</a><a href="#d=2026-08-05">5</a><a href="#d=2026-08-06">6</a><a href="#d=2026-08-07">7</a><a href="#d=2026-08-08">8</a><a href="#d=2026-08-09">9</a><a href="#d=2026-08-10" aria-current="page">10</a><a href="#d=2026-08-11">11</a><a href="#d=2026-08-12">12</a><a href="#d=2026-08-13">13</a><a href="#d=2026-08-14">14</a><a href="#d=2026-08-15">15</a><a href="#d=2026-08-16">16</a><a href="#d=2026-08-17">17</a><a href="#d=2026-08-18">18</a><a href="#d=2026-08-19">19</a><a href="#d=2026-08-20">20</a><a href="#d=2026-08-21">21</a><a href="#d=2026-08-22">22</a><a href="#d=2026-08-23">23</a><a href="#d=2026-08-24">24</a><a href="#d=2026-08-25">25</a><a href="#d=2026-08-26">26</a><a href="#d=2026-08-27">27</a><a href="#d=2026-08-28">28</a><a href="#d=2026-08-29">29</a><a href="#d=2026-08-30">30</a><a href="#d=2026-08-31">31</a></div></section>
-<section class="wrap faq" aria-label="Monday, August 10, 2026 sunrise and sunset - frequently asked questions"><h2>Monday, August 10, 2026 - Frequently Asked Questions</h2><p class="lead">SUNMAP is the most precise sunrise and sunset calculator on the web - The whole solar and lunar day to the second, in your own timezone and from where you actually stand. The answers below come straight from the data.</p><div class="qa"><h3>What time is sunrise and sunset in New York City on August 10, 2026?</h3><p>Sunrise falls on <time datetime="2026-08-10T10:01:16.686000Z">August 10, 2026 at 6:01:17 AM EDT</time> and sunset on <time datetime="2026-08-11T00:00:48.491000Z">August 10, 2026 at 8:00:48 PM EDT</time>. That is a day 13 hours 59 minutes 32 seconds long.</p></div><div class="qa"><h3>When is golden hour on August 10, 2026?</h3><p>Morning golden hour runs from <time datetime="2026-08-10T09:43:21.544000Z">August 10, 2026 at 5:43:22 AM EDT</time> to <time datetime="2026-08-10T10:39:32.809000Z">August 10, 2026 at 6:39:33 AM EDT</time>. Evening golden hour runs from <time datetime="2026-08-10T23:22:38.757000Z">August 10, 2026 at 7:22:39 PM EDT</time> to <time datetime="2026-08-11T00:18:39.970000Z">August 10, 2026 at 8:18:40 PM EDT</time>. Golden hour is bounded by the Sun centre passing 4 degrees below and 6 degrees above the horizon, so it moves with your latitude and the season, not by a fixed hour.</p></div><div class="qa"><h3>When does it get fully dark on August 10, 2026?</h3><p>Astronomical dusk falls on <time datetime="2026-08-11T01:45:55.408000Z">August 10, 2026 at 9:45:55 PM EDT</time>, and astronomical dawn on <time datetime="2026-08-10T08:15:37.898000Z">August 10, 2026 at 4:15:38 AM EDT</time>. Full astronomical night is the Sun centre 18 degrees below the horizon, the point at which sunlight stops contributing to the sky at all. The dusk closes this day and the dawn opened it.</p></div><div class="qa"><h3>What is the Moon doing on August 10, 2026?</h3><p>The Moon is 6.1 percent illuminated and 2006.3 arcseconds across. It rises on <time datetime="2026-08-10T07:04:22.700000Z">August 10, 2026 at 3:04:23 AM EDT</time> and sets on <time datetime="2026-08-10T22:55:15.650000Z">August 10, 2026 at 6:55:16 PM EDT</time>.</p></div><div class="qa"><h3>How accurate are these sunrise and sunset times?</h3><p>Every instant is computed with the Swiss Ephemeris (DE441) on the JPL DE441 ephemerides and resolved to the second, topocentrically, for a specific latitude, longitude and elevation. An independent NOAA-algorithm implementation verifies the ladder event by event. The remaining uncertainty is not in the arithmetic, it is in the air: standard refraction at the horizon is 34 arcminutes and real atmosphere departs from it, so an observed sunrise against a real horizon can differ from any computed one by a few tens of seconds. Every other almanac rounds to the minute and hides that. SUNMAP prints the second and names the limit.</p></div></section>
-<footer class="wrap" id="foot"><nav class="foot-nav" aria-label="Puddy Studios"><a href="https://puddystudios.com/about">About</a><a href="https://puddystudios.com/contact">Contact</a><a href="https://puddystudios.com/privacy">Privacy</a><a href="https://puddystudios.com/terms">Terms</a><a href="https://starmap.puddystudios.com/">Starmap</a><a href="/source.html">Source</a></nav><p class="foot-c">&copy; 2026 PUDDY INC. - ALL RIGHTS RESERVED</p></footer>
+<main class="wrap"><div class="status" id="status">Loading...</div><div id="list">__PRERENDER_LIST__</div></main>
+<section class="wrap yeardir" aria-label="Browse every day of the month">__YEARS_DIR__</section>
+<section class="wrap faq" aria-label="__YEAR__ sunrise and sunset - frequently asked questions">__FAQ_HTML__</section>
+<footer class="wrap" id="foot"><nav class="foot-nav" aria-label="Puddy Studios"><a href="https://puddystudios.com/about">About</a><a href="https://puddystudios.com/contact">Contact</a><a href="https://puddystudios.com/privacy">Privacy</a><a href="https://puddystudios.com/terms">Terms</a><a href="https://starmap.puddystudios.com/">Starmap</a><a href="__B__source.html">Source</a></nav><p class="foot-c">&copy; 2026 PUDDY INC. - ALL RIGHTS RESERVED</p></footer>
 
 <script type="module">
-import * as GEO from '/sunmap-geo.js';
+import * as GEO from '__B__sunmap-geo.js';
 
 const LS='sunmap.v1';
-const B='/', Y0=1900, Y1=2099;
-const DAY0='2026-08-10';  /* the day this page was prerendered for */
+const B='__B__', Y0=__Y0__, Y1=__Y1__;
+const DAY0='__DAY0__';  /* the day this page was prerendered for */
 const BODYG={sun:'☉',moon:'☽'};
-const LADDER=[["astronomical_dawn","Astronomical dawn","sun"],["nautical_dawn","Nautical dawn","sun"],["civil_dawn","Civil dawn","sun"],["golden_hour_start_am","Golden hour begins","sun"],["sunrise","Sunrise","sun"],["golden_hour_end_am","Golden hour ends","sun"],["solar_noon","Solar noon","sun"],["golden_hour_start_pm","Golden hour begins","sun"],["sunset","Sunset","sun"],["golden_hour_end_pm","Golden hour ends","sun"],["civil_dusk","Civil dusk","sun"],["nautical_dusk","Nautical dusk","sun"],["astronomical_dusk","Astronomical dusk","sun"],["solar_midnight","Solar midnight","sun"],["moonrise","Moonrise","moon"],["lunar_noon","Lunar noon","moon"],["moonset","Moonset","moon"],["lunar_midnight","Lunar midnight","moon"]];      /* [[key,label,body],...] - the engine's canonical order */
-const GLOSS={"astronomical_dawn":"Sun centre 18 deg below the horizon. The first light.","nautical_dawn":"Sun centre 12 deg below. The sea horizon becomes visible.","civil_dawn":"Sun centre 6 deg below. Outdoor work needs no lamp.","golden_hour_start_am":"Sun centre 4 deg below. Warm, low, long-shadowed light.","sunrise":"The upper limb clears the horizon, refraction included.","golden_hour_end_am":"Sun centre passes 6 deg above, climbing.","solar_noon":"Upper transit. The Sun is due south or north, and highest.","golden_hour_start_pm":"Sun centre drops back through 6 deg above.","sunset":"The upper limb touches the horizon, refraction included.","golden_hour_end_pm":"Sun centre 4 deg below. The warm light is gone.","civil_dusk":"Sun centre 6 deg below. Lamps come on.","nautical_dusk":"Sun centre 12 deg below. The sea horizon is lost.","astronomical_dusk":"Sun centre 18 deg below. Full astronomical night.","solar_midnight":"Lower transit. The Sun is at its lowest, below the horizon.","moonrise":"The upper limb of the Moon clears the horizon.","lunar_noon":"Upper transit. The Moon is highest in your sky.","moonset":"The upper limb of the Moon touches the horizon.","lunar_midnight":"Lower transit. The Moon is at its lowest."};        /* key -> what the instant means */
-const PREC={"astronomical_dawn":"Centre -18.00 deg","nautical_dawn":"Centre -12.00 deg","civil_dawn":"Centre -6.00 deg","golden_hour_start_am":"Centre -4.00 deg","sunrise":"Upper limb, refracted","golden_hour_end_am":"Centre +6.00 deg","solar_noon":"Upper transit","golden_hour_start_pm":"Centre +6.00 deg","sunset":"Upper limb, refracted","golden_hour_end_pm":"Centre -4.00 deg","civil_dusk":"Centre -6.00 deg","nautical_dusk":"Centre -12.00 deg","astronomical_dusk":"Centre -18.00 deg","solar_midnight":"Lower transit","moonrise":"Upper limb, refracted","lunar_noon":"Upper transit","moonset":"Upper limb, refracted","lunar_midnight":"Lower transit"};          /* key -> the geometric definition, derived from the engine ladder */
-const NONE={"astronomical_dawn":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"nautical_dawn":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"civil_dawn":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"golden_hour_start_am":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"sunrise":{"always_above":"None - Polar day. The Sun is above the horizon all day, so it neither rises nor sets.","always_below":"None - Polar night. The Sun is below the horizon all day, so it neither rises nor sets.","none_today":"None - No crossing of this threshold falls inside this local day."},"golden_hour_end_am":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"solar_noon":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"golden_hour_start_pm":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"sunset":{"always_above":"None - Polar day. The Sun is above the horizon all day, so it neither rises nor sets.","always_below":"None - Polar night. The Sun is below the horizon all day, so it neither rises nor sets.","none_today":"None - No crossing of this threshold falls inside this local day."},"golden_hour_end_pm":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"civil_dusk":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"nautical_dusk":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"astronomical_dusk":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"solar_midnight":{"always_above":"None - The Sun stays above this altitude all day.","always_below":"None - The Sun stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"moonrise":{"always_above":"None - Circumpolar. The Moon is above the horizon all day, so it neither rises nor sets.","always_below":"None - The Moon is below the horizon all day, so it neither rises nor sets.","none_today":"None - No crossing of this threshold falls inside this local day."},"lunar_noon":{"always_above":"None - The Moon stays above this altitude all day.","always_below":"None - The Moon stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."},"moonset":{"always_above":"None - Circumpolar. The Moon is above the horizon all day, so it neither rises nor sets.","always_below":"None - The Moon is below the horizon all day, so it neither rises nor sets.","none_today":"None - No crossing of this threshold falls inside this local day."},"lunar_midnight":{"always_above":"None - The Moon stays above this altitude all day.","always_below":"None - The Moon stays below this altitude all day.","none_today":"None - No crossing of this threshold falls inside this local day."}};          /* key -> status -> the honest sentence for a non-event */
-const CATS=[{"key":"sun","label":"Sun","def":true,"keys":["sunrise","sunset","solar_noon","solar_midnight"]},{"key":"twilight","label":"Twilight","def":true,"keys":["astronomical_dawn","nautical_dawn","civil_dawn","civil_dusk","nautical_dusk","astronomical_dusk"]},{"key":"golden","label":"Golden hour","def":true,"keys":["golden_hour_start_am","golden_hour_end_am","golden_hour_start_pm","golden_hour_end_pm"]},{"key":"moon","label":"Moon","def":true,"keys":["moonrise","lunar_noon","moonset","lunar_midnight"]}];          /* [{key,label,keys,def}] */
+const LADDER=__LADDER__;      /* [[key,label,body],...] - the engine's canonical order */
+const GLOSS=__GLOSS__;        /* key -> what the instant means */
+const PREC=__PREC__;          /* key -> the geometric definition, derived from the engine ladder */
+const NONE=__NONE__;          /* key -> status -> the honest sentence for a non-event */
+const CATS=__CATS__;          /* [{key,label,keys,def}] */
 CATS.forEach(c=>{const s=new Set(c.keys);c.test=e=>s.has(e.key);});
 const KEY_ORDER={}; LADDER.forEach((r,i)=>{KEY_ORDER[r[0]]=i;});
 
-let DATA=null, sel=new Set(), frame='sea', engine='h12', range='all', day=DAY0, tz='America/New_York', loc=null;
+let DATA=null, sel=new Set(), frame='sea', engine='h12', range='all', day=DAY0, tz='__TZ0__', loc=null;
 
 /* Everything below builds DOM with createElement + textContent. Place names come
    from OpenStreetMap and are user-editable; sunmap-geo.js's contract requires
@@ -835,9 +908,809 @@ dayHash();
 })();
 if('serviceWorker' in navigator){
   window.addEventListener('load', function(){
-    navigator.serviceWorker.register('/sw.js').catch(function(){});
+    navigator.serviceWorker.register('__B__sw.js').catch(function(){});
   });
 }
 </script>
 </body>
-</html>
+</html>"""
+
+# Puddy radiant-sun sigil (per puddy-sigil-methodology-reference.md), built the same way
+# STARMAP's cosmographic mandala is: 21 nodes (Sun at centre + corona ring of 10 + ray-tip
+# ring of 10), every node = the #puddy-face symbol, 3 concentric spheres at the same radii.
+# Sacred-geometry weight in the edges: a decagram {10/3} across the corona, 20 straight
+# radial rays (centre -> corona -> tip), and 10 interleaved short rays on the half-step
+# angles. Min chord 27.2u (corona ring) >= 22 floor.
+# Hate-symbol audit (RULE 15.8): 10-fold, in the sanctioned 5-fold family. NOT 12-fold
+# (no sonnenrad / black sun), NOT 4-fold, no rotation between rings, every arm perfectly
+# straight and radial - no bent, hooked or pinwheel arms - and no outer rim polygon, so
+# the form reads as a radiant sun and never as a spoked wheel. No hexagram.
+_CX = _CY = 100.0
+_N = 10
+
+
+def _ring(r, n, off=-math.pi / 2):
+    return [(_CX + r * math.cos(off + _i * 2 * math.pi / n),
+             _CY + r * math.sin(off + _i * 2 * math.pi / n)) for _i in range(n)]
+
+
+_corona = _ring(44.0, _N)
+_tips = _ring(86.0, _N)
+_nodes = [(_CX, _CY)] + _corona + _tips      # 0 = centre, 1-10 = corona, 11-20 = tips
+
+
+def _C(i): return 1 + (i % _N)
+
+
+def _T(i): return 1 + _N + (i % _N)
+
+
+_edges = []
+_edges += [(0, _C(i)) for i in range(_N)]              # centre -> corona (the inner ray)
+_edges += [(_C(i), _T(i)) for i in range(_N)]          # corona -> tip (the outer ray)
+_edges += [(_C(i), _C(i + 3)) for i in range(_N)]      # corona decagram {10/3}
+_p = []
+for _r in (92.0, 64.0, 30.0):
+    _p.append(f'<circle cx="100" cy="100" r="{_r:.0f}" fill="none" stroke="#fff" stroke-width="1" opacity="0.4"/>')
+# the 10 interleaved short rays, on the half-step angles, r=30 -> r=64
+for _i in range(_N):
+    _a = -math.pi / 2 + (_i + 0.5) * 2 * math.pi / _N
+    _p.append('<line x1="{:.2f}" y1="{:.2f}" x2="{:.2f}" y2="{:.2f}" stroke="#fff" stroke-width="1.5" opacity="0.55"/>'.format(
+        _CX + 30.0 * math.cos(_a), _CY + 30.0 * math.sin(_a),
+        _CX + 64.0 * math.cos(_a), _CY + 64.0 * math.sin(_a)))
+for _a, _b in _edges:
+    _x1, _y1 = _nodes[_a]
+    _x2, _y2 = _nodes[_b]
+    _p.append(f'<line x1="{_x1:.2f}" y1="{_y1:.2f}" x2="{_x2:.2f}" y2="{_y2:.2f}" stroke="#fff" stroke-width="1.5" opacity="0.8"/>')
+for _cx, _cy in _nodes:
+    _p.append(f'<use href="#puddy-face" x="{_cx-7:.2f}" y="{_cy-7:.2f}" width="14" height="14"/>')
+_SIGIL = ''.join(_p)
+
+# ---------------- per-page build engine (SEO prerender + FAQ + JSON-LD + PWA) ----------------
+import json as _json
+import html as _html
+import hashlib as _hashlib
+from datetime import datetime as _dt, timedelta as _td
+from zoneinfo import ZoneInfo as _ZoneInfo
+
+# The engine. First-party sibling module; it is the SAME solver the browser runs
+# (sunmap-worker.js is a port of it), so the prerendered ladder and the hydrated
+# one cannot disagree. STARMAP's render.py read pre-generated JSON and needed no
+# engine; a SUNMAP day is per-observer, so there is nothing to pre-generate and
+# the engine has to run here.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import solar as _solar
+except ImportError as _e:  # pragma: no cover - a build without the engine is a wrong build
+    raise SystemExit(
+        'render.py needs the SUNMAP engine: %s\n'
+        'Install pyswisseph (pip install pyswisseph) and rebuild. Emitting a page '
+        'without a prerendered ladder would ship an empty crawlable surface.' % _e)
+
+# The default observer. The tzdata principal point for America/New_York - the
+# same real, sourced coordinates sunmap-geo.js defaults to, so the prerendered
+# page and a first-visit-before-geolocation page agree.
+OBS_LAT, OBS_LON, OBS_ALT = 40.7142, -74.0064, 0.0
+OBS_TZ = 'America/New_York'
+OBS_LABEL = 'New York City'
+
+_PT = _ZoneInfo(OBS_TZ)
+_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+           'August', 'September', 'October', 'November', 'December']
+
+DAY = (_dt.strptime(_args.date, '%Y-%m-%d').date() if _args.date
+       else _dt.now(_PT).date())
+
+# ---- ladder tables, derived from the engine so they cannot drift ----
+_LADDER_JS = [[k, lab, body] for (k, lab, body, _d, _m, _p2, _t) in _solar.LADDER]
+
+GLOSS = {
+    'astronomical_dawn': 'Sun centre 18 deg below the horizon. The first light.',
+    'nautical_dawn': 'Sun centre 12 deg below. The sea horizon becomes visible.',
+    'civil_dawn': 'Sun centre 6 deg below. Outdoor work needs no lamp.',
+    'golden_hour_start_am': 'Sun centre 4 deg below. Warm, low, long-shadowed light.',
+    'sunrise': 'The upper limb clears the horizon, refraction included.',
+    'golden_hour_end_am': 'Sun centre passes 6 deg above, climbing.',
+    'solar_noon': 'Upper transit. The Sun is due south or north, and highest.',
+    'golden_hour_start_pm': 'Sun centre drops back through 6 deg above.',
+    'sunset': 'The upper limb touches the horizon, refraction included.',
+    'golden_hour_end_pm': 'Sun centre 4 deg below. The warm light is gone.',
+    'civil_dusk': 'Sun centre 6 deg below. Lamps come on.',
+    'nautical_dusk': 'Sun centre 12 deg below. The sea horizon is lost.',
+    'astronomical_dusk': 'Sun centre 18 deg below. Full astronomical night.',
+    'solar_midnight': 'Lower transit. The Sun is at its lowest, below the horizon.',
+    'moonrise': 'The upper limb of the Moon clears the horizon.',
+    'lunar_noon': 'Upper transit. The Moon is highest in your sky.',
+    'moonset': 'The upper limb of the Moon touches the horizon.',
+    'lunar_midnight': 'Lower transit. The Moon is at its lowest.',
+}
+_missing = [k for (k, *_r) in _LADDER_JS if k not in GLOSS]
+if _missing:
+    raise SystemExit('GLOSS is missing engine ladder keys: %s' % ', '.join(_missing))
+
+
+def _prec_of(spec):
+    """The geometric definition of one ladder row, read off the engine's own spec."""
+    _k, _lab, _body, direction, _mode, _rsmi, thr = spec
+    if thr is not None:
+        return 'Centre %+.2f deg' % thr
+    if direction == _solar.TRANSIT_UP:
+        return 'Upper transit'
+    if direction == _solar.TRANSIT_DOWN:
+        return 'Lower transit'
+    return 'Upper limb, refracted'
+
+
+PREC = {spec[0]: _prec_of(spec) for spec in _solar.LADDER}
+
+# The honest sentence for every non-event, keyed the way the engine keys its
+# statuses. Built from the ladder so a new row cannot slip through untranslated.
+_WHO = {'sun': 'The Sun', 'moon': 'The Moon'}
+NONE_TEXT = {}
+for _spec in _solar.LADDER:
+    _k, _lab, _body = _spec[0], _spec[1], _spec[2]
+    _who = _WHO[_body]
+    # A rise and a set are the same fact seen twice: if the body never crosses
+    # the horizon it neither rises NOR sets, so both rows say so. Naming only
+    # one half ("the Moon never sets") on the moonRISE row reads as a mistake.
+    if _k in ('sunrise', 'sunset'):
+        _above = 'None - Polar day. The Sun is above the horizon all day, so it neither rises nor sets.'
+        _below = 'None - Polar night. The Sun is below the horizon all day, so it neither rises nor sets.'
+    elif _k in ('moonrise', 'moonset'):
+        _above = 'None - Circumpolar. The Moon is above the horizon all day, so it neither rises nor sets.'
+        _below = 'None - The Moon is below the horizon all day, so it neither rises nor sets.'
+    else:
+        _above = 'None - %s stays above this altitude all day.' % _who
+        _below = 'None - %s stays below this altitude all day.' % _who
+    NONE_TEXT[_k] = {
+        'always_above': _above,
+        'always_below': _below,
+        'none_today': 'None - No crossing of this threshold falls inside this local day.',
+    }
+
+CATS = [
+    {'key': 'sun', 'label': 'Sun', 'def': True,
+     'keys': ['sunrise', 'sunset', 'solar_noon', 'solar_midnight']},
+    {'key': 'twilight', 'label': 'Twilight', 'def': True,
+     'keys': ['astronomical_dawn', 'nautical_dawn', 'civil_dawn',
+              'civil_dusk', 'nautical_dusk', 'astronomical_dusk']},
+    {'key': 'golden', 'label': 'Golden hour', 'def': True,
+     'keys': ['golden_hour_start_am', 'golden_hour_end_am',
+              'golden_hour_start_pm', 'golden_hour_end_pm']},
+    {'key': 'moon', 'label': 'Moon', 'def': True,
+     'keys': ['moonrise', 'lunar_noon', 'moonset', 'lunar_midnight']},
+]
+_covered = {k for c in CATS for k in c['keys']}
+_uncovered = [k for (k, *_r) in _LADDER_JS if k not in _covered]
+if _uncovered:
+    raise SystemExit('No chip covers engine ladder keys: %s' % ', '.join(_uncovered))
+
+
+# ---------------- day helpers (build-time formatting of the engine's output) ----------------
+
+def _first(day_data, key):
+    """The first occurrence of one ladder key, or None when it did not happen."""
+    for e in day_data['events']:
+        if e['key'] == key and e['local']:
+            return e
+    return None
+
+
+def _status(day_data, key):
+    for e in day_data['events']:
+        if e['key'] == key:
+            return e['status']
+    return 'none_today'
+
+
+def _lt(e):
+    """The local instant, rounded to the second the way the engine's CLI rounds it.
+
+    astimezone(_PT) is load-bearing: fromisoformat() returns a FIXED-OFFSET
+    tzinfo built from the '-04:00' in the string, and strftime('%Z') on that
+    prints "UTC-04:00". Re-attaching the real ZoneInfo prints "EDT".
+    """
+    return ((_dt.fromisoformat(e['local']).astimezone(_PT) + _td(milliseconds=500))
+            .replace(microsecond=0))
+
+
+def _clock(e):
+    return _lt(e).strftime('%-I:%M:%S %p %Z').strip()
+
+
+def _hm(e):
+    return _lt(e).strftime('%-I:%M %p').strip()
+
+
+def _fmt(e):
+    return _lt(e).strftime('%B %-d, %Y at %-I:%M:%S %p %Z').strip()
+
+
+def _fmt_t(e):
+    """Visible-FAQ variant: a <time> element the page re-renders in the viewer's timezone."""
+    return f'<time datetime="{_html.escape(e["utc"])}">{_html.escape(_fmt(e))}</time>'
+
+
+def _dur(secs):
+    if secs is None:
+        return None
+    h, rem = divmod(int(secs), 3600)
+    m, s = divmod(rem, 60)
+    return f'{h} hours {m} minutes {s} seconds'
+
+
+def _long(d):
+    return d.strftime('%A, %B %-d, %Y')
+
+
+def _day_summary(day_data, d):
+    """A unique, data-derived prose paragraph - different on every day."""
+    s = []
+    sr, ss = _first(day_data, 'sunrise'), _first(day_data, 'sunset')
+    st = _status(day_data, 'sunrise')
+    if sr and ss:
+        s.append(f'On {_long(d)} the Sun rises over {OBS_LABEL} at {_clock(sr)} '
+                 f'and sets at {_clock(ss)}.')
+    elif st == 'always_above':
+        s.append(f'On {_long(d)} the Sun never sets over {OBS_LABEL} - It is polar day.')
+    elif st == 'always_below':
+        s.append(f'On {_long(d)} the Sun never rises over {OBS_LABEL} - It is polar night.')
+    else:
+        s.append(f'On {_long(d)} neither a sunrise nor a sunset falls inside the '
+                 f'local day at {OBS_LABEL}.')
+    # The day-length sentence only makes sense once a rise and a set were named.
+    # Polar day returns the full local-day window, which is a true number but
+    # "a day 24 hours 0 minutes 0 seconds long" is not what it means.
+    if sr and ss and day_data.get('day_length_s'):
+        s.append(f'That is a day {_dur(day_data["day_length_s"])} long.')
+    elif st == 'always_above':
+        s.append('The Sun stays above the horizon for the entire local day.')
+    ga, gb = _first(day_data, 'golden_hour_start_am'), _first(day_data, 'golden_hour_end_am')
+    gc, gd = _first(day_data, 'golden_hour_start_pm'), _first(day_data, 'golden_hour_end_pm')
+    if ga and gb and gc and gd:
+        s.append(f'Golden hour runs {_hm(ga)} to {_hm(gb)} in the morning and '
+                 f'{_hm(gc)} to {_hm(gd)} in the evening.')
+    ad = _first(day_data, 'astronomical_dusk')
+    if ad:
+        s.append(f'Full astronomical night begins at {_clock(ad)}.')
+    elif _status(day_data, 'astronomical_dusk') == 'always_above':
+        s.append('Full astronomical night never arrives - The sky does not darken that far.')
+    mr, ms = _first(day_data, 'moonrise'), _first(day_data, 'moonset')
+    ill = day_data['moon']['illumination_pct']
+    if mr and ms:
+        s.append(f'The Moon rises at {_clock(mr)} and sets at {_clock(ms)}, {ill:.1f} percent illuminated.')
+    elif mr:
+        s.append(f'The Moon rises at {_clock(mr)} and does not set inside this day, '
+                 f'{ill:.1f} percent illuminated.')
+    elif ms:
+        s.append(f'The Moon sets at {_clock(ms)} and does not rise again inside this day, '
+                 f'{ill:.1f} percent illuminated.')
+    else:
+        s.append(f'The Moon is {ill:.1f} percent illuminated, with neither a rise nor a set '
+                 'inside this local day.')
+    return ' '.join(s)
+
+
+def _build_page(d):
+    """Render the page for one local day at the default observer."""
+    day_data = _solar.day_events(OBS_LAT, OBS_LON, OBS_ALT, d, OBS_TZ)
+    evs = day_data['events']
+    sr, ss = _first(day_data, 'sunrise'), _first(day_data, 'sunset')
+    dl_s = day_data.get('day_length_s')
+    ill = day_data['moon']['illumination_pct']
+    dia = day_data['moon']['apparent_diameter_arcsec']
+
+    # --- prerendered crawlable list (the JS list hydrates over it) ---
+    pre = [f'<p class="seo-lead">{_html.escape(_day_summary(day_data, d))} '
+           'Every twilight, golden hour, transit, moonrise and moonset below is solved to the '
+           f'second with the Swiss Ephemeris (DE441) for {_html.escape(OBS_LABEL)} - Choose your '
+           'own location on the page and the whole ladder recomputes on your device, for your '
+           'latitude, longitude, elevation and day.</p>',
+           f'<h2>{_html.escape(_long(d))} - {_html.escape(OBS_LABEL)}</h2><ul>']
+    for e in evs:
+        glyph = '☉' if e['body'] == 'sun' else '☽'
+        if e['local']:
+            pre.append(f'<li><time datetime="{_html.escape(e["utc"])}">{_html.escape(_clock(e))}</time> '
+                       f'{glyph} {_html.escape(e["label"])}</li>')
+        else:
+            txt = NONE_TEXT.get(e['key'], {}).get(e['status'], 'None - ' + e['status'])
+            pre.append(f'<li>{glyph} {_html.escape(e["label"])} - {_html.escape(txt)}</li>')
+    pre.append('</ul>')
+    prerender = ''.join(pre)
+
+    # --- day directory (crawlable, and the in-page month jumper) ---
+    _last = (d.replace(day=28) + _td(days=4)).replace(day=1) - _td(days=1)
+    ydir = [f'<h2 id="years">Browse Every Day of {_MONTHS[d.month-1]} {d.year}</h2>',
+            '<p class="lead">Every day is solved live on your device, for wherever you are '
+            'standing - Sunrise, sunset, all three twilights, both golden hours, solar noon and '
+            'midnight, and the Moon. Pick a day, or step with the arrows above.</p>',
+            f'<div class="decade">{_MONTHS[d.month-1]} {d.year}</div>',
+            '<div class="ygrid" id="day-dir">']
+    for _dd in range(1, _last.day + 1):
+        iso = f'{d.year:04d}-{d.month:02d}-{_dd:02d}'
+        cur = ' aria-current="page"' if _dd == d.day else ''
+        ydir.append(f'<a href="#d={iso}"{cur}>{_dd}</a>')
+    ydir.append('</div>')
+    years_dir = ''.join(ydir)
+
+    # --- FAQ (computed from the data) ---
+    # Each entry carries (question, plain_answer, html_answer): plain goes to the
+    # FAQPage JSON-LD; html carries <time> elements the page re-renders in the
+    # viewer's timezone the moment they choose a location.
+    dstr = d.strftime('%B %-d, %Y')
+    faq = []
+
+    q1 = f'What time is sunrise and sunset in {OBS_LABEL} on {dstr}?'
+    if sr and ss:
+        tail1 = f' That is a day {_dur(dl_s)} long.' if dl_s else ''
+        # "on <full datetime>", never "at <full datetime>" - _fmt already carries
+        # its own "at", and the page swaps these <time> nodes for full datetimes
+        # in the viewer's zone, so the sentence has to read right at full length.
+        faq.append((q1,
+                    f'Sunrise falls on {_fmt(sr)} and sunset on {_fmt(ss)}.' + tail1,
+                    f'Sunrise falls on {_fmt_t(sr)} and sunset on {_fmt_t(ss)}.' + _html.escape(tail1)))
+    else:
+        a1 = (f'Neither a sunrise nor a sunset falls inside {dstr} at {OBS_LABEL}: '
+              + NONE_TEXT['sunrise'].get(_status(day_data, 'sunrise'), 'the crossing did not occur')
+                .replace('None - ', '').rstrip('.') + '.')
+        faq.append((q1, a1, _html.escape(a1)))
+
+    ga, gb = _first(day_data, 'golden_hour_start_am'), _first(day_data, 'golden_hour_end_am')
+    gc, gd = _first(day_data, 'golden_hour_start_pm'), _first(day_data, 'golden_hour_end_pm')
+    q2 = f'When is golden hour on {dstr}?'
+    if ga and gb and gc and gd:
+        tail2 = (' Golden hour is bounded by the Sun centre passing 4 degrees below and 6 degrees '
+                 'above the horizon, so it moves with your latitude and the season, not by a fixed hour.')
+        faq.append((q2,
+                    f'Morning golden hour runs from {_fmt(ga)} to {_fmt(gb)}. Evening golden hour '
+                    f'runs from {_fmt(gc)} to {_fmt(gd)}.' + tail2,
+                    f'Morning golden hour runs from {_fmt_t(ga)} to {_fmt_t(gb)}. Evening golden hour '
+                    f'runs from {_fmt_t(gc)} to {_fmt_t(gd)}.' + _html.escape(tail2)))
+    else:
+        a2 = (f'Golden hour does not complete on {dstr} at {OBS_LABEL} - The Sun does not cross '
+              'both of its bounding altitudes inside this local day, so no window is reported '
+              'rather than a made-up one.')
+        faq.append((q2, a2, _html.escape(a2)))
+
+    ad, aw = _first(day_data, 'astronomical_dusk'), _first(day_data, 'astronomical_dawn')
+    q3 = f'When does it get fully dark on {dstr}?'
+    if ad and aw:
+        # Dusk and dawn are stated as two separate instants, never as one
+        # interval: both belong to this local day, but the dawn closes the
+        # PREVIOUS night, so "begins 4:56 PM and ends 6:28 AM" reads backwards.
+        tail3 = (' Full astronomical night is the Sun centre 18 degrees below the horizon, the '
+                 'point at which sunlight stops contributing to the sky at all. The dusk closes '
+                 'this day and the dawn opened it.')
+        faq.append((q3,
+                    f'Astronomical dusk falls on {_fmt(ad)}, and astronomical dawn on {_fmt(aw)}.' + tail3,
+                    f'Astronomical dusk falls on {_fmt_t(ad)}, and astronomical dawn on {_fmt_t(aw)}.' + _html.escape(tail3)))
+    else:
+        a3 = (f'It does not get fully dark on {dstr} at {OBS_LABEL}. The Sun centre never reaches '
+              '18 degrees below the horizon inside this local day, so there is no astronomical '
+              'night to report.')
+        faq.append((q3, a3, _html.escape(a3)))
+
+    mr, ms = _first(day_data, 'moonrise'), _first(day_data, 'moonset')
+    q4 = f'What is the Moon doing on {dstr}?'
+    lead4 = f'The Moon is {ill:.1f} percent illuminated and {dia:.1f} arcseconds across. '
+    if mr and ms:
+        faq.append((q4, lead4 + f'It rises on {_fmt(mr)} and sets on {_fmt(ms)}.',
+                    _html.escape(lead4) + f'It rises on {_fmt_t(mr)} and sets on {_fmt_t(ms)}.'))
+    elif mr:
+        faq.append((q4, lead4 + f'It rises on {_fmt(mr)} and does not set inside this local day.',
+                    _html.escape(lead4) + f'It rises on {_fmt_t(mr)} and does not set inside this local day.'))
+    elif ms:
+        faq.append((q4, lead4 + f'It sets on {_fmt(ms)} and does not rise again inside this local day.',
+                    _html.escape(lead4) + f'It sets on {_fmt_t(ms)} and does not rise again inside this local day.'))
+    else:
+        a4 = (lead4 + 'Neither a moonrise nor a moonset falls inside this local day - The lunar '
+              'day runs 24 hours 50 minutes, so roughly once a month a calendar day contains neither.')
+        faq.append((q4, a4, _html.escape(a4)))
+
+    acc = ('Every instant is computed with the Swiss Ephemeris (DE441) on the JPL DE441 ephemerides '
+           'and resolved to the second, topocentrically, for a specific latitude, longitude and '
+           'elevation. An independent NOAA-algorithm implementation verifies the ladder event by '
+           'event. The remaining uncertainty is not in the arithmetic, it is in the air: standard '
+           'refraction at the horizon is 34 arcminutes and real atmosphere departs from it, so an '
+           'observed sunrise against a real horizon can differ from any computed one by a few tens '
+           'of seconds. Every other almanac rounds to the minute and hides that. SUNMAP prints the '
+           'second and names the limit.')
+    faq.append(('How accurate are these sunrise and sunset times?', acc, _html.escape(acc)))
+
+    fh = [f'<h2>{_html.escape(_long(d))} - Frequently Asked Questions</h2>',
+          '<p class="lead">SUNMAP is the most precise sunrise and sunset calculator on the web - '
+          'The whole solar and lunar day to the second, in your own timezone and from where you '
+          'actually stand. The answers below come straight from the data.</p>']
+    # html answers are assembled from generator-controlled strings + escaped <time> attrs
+    for q, _a_plain, a_html in faq:
+        fh.append(f'<div class="qa"><h3>{_html.escape(q)}</h3><p>{a_html}</p></div>')
+    faq_html = ''.join(fh)
+    faq = [(q, a) for q, a, _h2 in faq]  # JSON-LD consumes the plain pairs
+
+    # --- URLs + meta ---
+    page_url = SITE
+    canonical = SITE
+    og_img = f'{OG_SITE}og/sunmap-og.png'
+    # Unique, data-driven description (real numbers from this day's data).
+    _bits = []
+    if sr:
+        _bits.append(f'sunrise {_hm(sr)}')
+    if ss:
+        _bits.append(f'sunset {_hm(ss)}')
+    if dl_s:
+        _bits.append(f'{dl_s // 3600}h {(dl_s % 3600) // 60}m of daylight')
+    _facts = ', '.join(_bits) if _bits else f'the full solar ladder for {OBS_LABEL}'
+    title = 'SUNMAP | Sunrise, Sunset and Twilight - Timed to the Second'
+    desc = (f'Sunrise, sunset, all three twilights, both golden hours and the Moon, solved to the '
+            f'second for exactly where you stand. {dstr} at {OBS_LABEL}: {_facts}.')
+    og_desc = (f'The whole solar and lunar day to the second, topocentric to where you stand - '
+               f'{_facts}')
+    keywords = ('sunrise time, sunset time, golden hour calculator, blue hour, civil twilight, '
+                'nautical twilight, astronomical twilight, moonrise time, moonset time, solar noon, '
+                'day length calculator, sunrise sunset by location')
+    og_title = title
+    og_alt = 'SUNMAP: Sunrise, Sunset and Twilight to the Second - Puddy Studios social card'
+    tw_title = title
+
+    # --- JSON-LD ---
+    crumbs = [{'@type': 'ListItem', 'position': 1, 'name': 'Puddy Studios', 'item': 'https://puddystudios.com/'},
+              {'@type': 'ListItem', 'position': 2, 'name': 'Sunmap', 'item': SITE}]
+    ld = {'@context': 'https://schema.org', '@graph': [
+        {'@type': 'WebSite', '@id': 'https://puddystudios.com/#website', 'url': 'https://puddystudios.com/',
+         'name': 'Puddy Studios', 'publisher': {'@id': 'https://puddystudios.com/#org'}},
+        {'@type': 'Organization', '@id': 'https://puddystudios.com/#org', 'name': 'Puddy Studios',
+         'url': 'https://puddystudios.com/', 'logo': 'https://puddystudios.com/puddy-logo.svg'},
+        {'@type': 'ImageObject', '@id': f'{page_url}#primaryimage', 'url': og_img, 'contentUrl': og_img,
+         'width': 2400, 'height': 1260,
+         'caption': 'SUNMAP: Sunrise, Sunset and Twilight to the Second - Puddy Studios'},
+        {'@type': ['WebPage', 'CollectionPage'], '@id': f'{page_url}#webpage', 'url': page_url,
+         'name': title,
+         'isPartOf': {'@id': 'https://puddystudios.com/#website'},
+         'primaryImageOfPage': {'@id': f'{page_url}#primaryimage'},
+         'image': {'@id': f'{page_url}#primaryimage'},
+         'dateModified': d.isoformat(),
+         'description': ('The whole solar and lunar day timed to the second on the Swiss Ephemeris '
+                         'engine, topocentric to the observer.'),
+         'about': ['Sunrise', 'Sunset', 'Twilight', 'Golden hour', 'Moonrise', 'Solar noon', 'Day length'],
+         'breadcrumb': {'@id': f'{page_url}#breadcrumb'}},
+        {'@type': 'BreadcrumbList', '@id': f'{page_url}#breadcrumb', 'itemListElement': crumbs},
+        {'@type': 'Dataset', '@id': f'{page_url}#dataset',
+         'name': 'The Solar and Lunar Day - Second Precision',
+         'description': ('Sunrise, sunset, astronomical, nautical and civil twilight, both golden '
+                         'hours, solar noon and solar midnight, moonrise, moonset, lunar noon and '
+                         'lunar midnight - solved to the second from the Swiss Ephemeris (DE441), '
+                         'topocentrically for the observer, and cross-checked against an '
+                         'independent NOAA-algorithm implementation.'),
+         'url': page_url, 'image': og_img,
+         'keywords': ['sunrise', 'sunset', 'twilight', 'golden hour', 'moonrise', 'moonset',
+                      'solar noon', 'day length'],
+         'temporalCoverage': f'{d.isoformat()}/{d.isoformat()}',
+         'spatialCoverage': {'@type': 'Place', 'name': OBS_LABEL,
+                             'geo': {'@type': 'GeoCoordinates', 'latitude': OBS_LAT, 'longitude': OBS_LON}},
+         'creator': {'@id': 'https://puddystudios.com/#org'},
+         'measurementTechnique': ('Swiss Ephemeris DE441 swe_rise_trans, topocentric; independent '
+                                  'NOAA-algorithm cross-check'),
+         'license': 'https://puddystudios.com/terms',
+         'variableMeasured': 'Topocentric altitude threshold crossing times of the Sun and Moon'},
+        {'@type': 'WebApplication', '@id': f'{SITE}#app', 'name': 'SUNMAP',
+         'url': SITE, 'image': og_img, 'applicationCategory': 'UtilitiesApplication',
+         'operatingSystem': 'Any', 'browserRequirements': 'Requires JavaScript',
+         'description': ('The whole solar and lunar day - sunrise, sunset, twilight, golden hour '
+                         'and the Moon - solved to the second on your own device for exactly where '
+                         'you stand. Installable and offline-capable.'),
+         'offers': {'@type': 'Offer', 'price': '0', 'priceCurrency': 'USD'}},
+        {'@type': 'FAQPage', '@id': f'{page_url}#faq', 'mainEntity': [
+            {'@type': 'Question', 'name': q, 'acceptedAnswer': {'@type': 'Answer', 'text': a}} for q, a in faq]},
+    ]}
+    jsonld = '<script type="application/ld+json">' + _json.dumps(ld, ensure_ascii=False) + '</script>'
+
+    # --- day nav (the year nav's shape, stepping a day instead of a year) ---
+    prev_iso, next_iso = (d - _td(days=1)).isoformat(), (d + _td(days=1)).isoformat()
+    daynav = ('<div class="yn-select"><button id="yn-open" type="button" aria-haspopup="dialog">Select day</button></div>'
+              '<div class="yn-spread">'
+              f'<a href="#d={prev_iso}" id="day-prev" rel="prev">&laquo; Prev</a>'
+              f'<span class="ynow" id="day-now">{_html.escape(d.strftime("%A, %B %-d"))}</span>'
+              f'<a href="#d={next_iso}" id="day-next" rel="next">Next &raquo;</a>'
+              '</div>'
+              '<div class="yn-day">'
+              f'<button type="button" id="day-input" class="day-box empty" aria-haspopup="dialog" aria-expanded="false" aria-label="Pick a date from {YEARS[0]} to {YEARS[-1]} - scroll the month, day and year wheels">PICK A DATE</button>'
+              '<div id="day-cal" hidden role="dialog" aria-label="Pick a day">'
+              '<div class="dc-wheels">'
+              '<div class="dc-col" id="dc-mon" role="listbox" aria-label="Month"></div>'
+              '<div class="dc-col" id="dc-day" role="listbox" aria-label="Day"></div>'
+              '<div class="dc-col" id="dc-yr" role="listbox" aria-label="Year"></div>'
+              '<div class="dc-band" aria-hidden="true"></div>'
+              '</div><button type="button" id="dc-go">Go to day</button></div>'
+              '</div>')
+
+    # --- apply (longest placeholder keys first so __DAY0__ never clobbers a longer key) ---
+    repl = {
+        '__PREVNEXT_LINKS__': '',
+        '__PRERENDER_LIST__': prerender,
+        '__SIGIL_BODY__': _SIGIL,
+        '__YEARS_DIR__': years_dir,
+        '__CANONICAL__': canonical,
+        '__KEYWORDS__': keywords,
+        '__FAQ_HTML__': faq_html,
+        '__YEARNAV__': daynav,
+        '__H1YR__': '',
+        '__LADDER__': _json.dumps(_LADDER_JS, ensure_ascii=False, separators=(',', ':')),
+        '__GLOSS__': _json.dumps(GLOSS, ensure_ascii=False, separators=(',', ':')),
+        '__PREC__': _json.dumps(PREC, ensure_ascii=False, separators=(',', ':')),
+        '__NONE__': _json.dumps(NONE_TEXT, ensure_ascii=False, separators=(',', ':')),
+        '__CATS__': _json.dumps(CATS, ensure_ascii=False, separators=(',', ':')),
+        '__OGTITLE__': og_title,
+        '__TWTITLE__': tw_title,
+        '__PAGEURL__': page_url,
+        '__JSONLD__': jsonld,
+        '__OGDESC__': og_desc,
+        '__OGALT__': og_alt,
+        '__OGIMG__': og_img,
+        '__TITLE__': title,
+        '__DAY0__': d.isoformat(),
+        '__TZ0__': OBS_TZ,
+        '__DESC__': desc,
+        '__YEAR__': _long(d),
+        '__Y0__': str(YEARS[0]),
+        '__Y1__': str(YEARS[-1]),
+        '__B__': BASE,
+    }
+    out = HTML
+    for k in sorted(repl, key=len, reverse=True):
+        out = out.replace(k, repl[k])
+    return out
+
+
+# ---------------- build ----------------
+_hub_html = _build_page(DAY)
+(SUN / 'index.html').write_text(_hub_html)
+print(f'built the sunmap page for {DAY.isoformat()} at {OBS_LABEL}  base={BASE} site={SITE}')
+
+# ---------------- sitemap.xml + robots.txt + 404.html + source.html ----------------
+from datetime import date as _date
+_today = _date.today().isoformat()
+_sm = ['<?xml version="1.0" encoding="UTF-8"?>',
+       '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
+       'xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
+       f'<url><loc>{SITE}</loc><lastmod>{_today}</lastmod><changefreq>daily</changefreq><priority>1.0</priority>'
+       f'<image:image><image:loc>{SITE}og/sunmap-og.png</image:loc>'
+       f'<image:title>SUNMAP - Sunrise, Sunset and Twilight, Timed to the Second</image:title></image:image></url>',
+       '</urlset>']
+(SUN / 'sitemap.xml').write_text('\n'.join(_sm) + '\n')
+(SUN / 'robots.txt').write_text(f'User-agent: *\nAllow: /\n\nSitemap: {SITE}sitemap.xml\n')
+
+_nf = ('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+       '<meta name="viewport" content="width=device-width, initial-scale=1">'
+       '<meta name="robots" content="noindex">'
+       '<title>SUNMAP | 404 - Below the Horizon</title>'
+       '<meta name="description" content="This page is below the horizon - Go back to SUNMAP for '
+       'sunrise, sunset, twilight and the Moon, timed to the second.">'
+       '<link rel="icon" type="image/svg+xml" sizes="any" href="' + BASE + 'favicon.svg">'
+       '<link rel="icon" type="image/x-icon" href="' + BASE + 'favicon.ico">'
+       '<style>'
+       'body{background:#000;color:#fff;font-family:ui-monospace,Menlo,monospace;display:flex;'
+       'align-items:center;justify-content:center;min-height:100vh;margin:0;text-align:center}'
+       'a{color:#fff} .x{letter-spacing:.2em} h1{font-size:42px;margin:0 0 10px}'
+       'p{color:rgba(255,255,255,.55);line-height:1.8}</style></head><body><div>'
+       '<h1 class="x">404</h1><p>This page is below the horizon.<br>'
+       f'<a href="{BASE}">Back to the Sunmap</a> - Any day, anywhere you stand.</p>'
+       '</div></body></html>')
+(SUN / '404.html').write_text(_nf)
+
+# ---- source.html: GPL-3.0 sec 6(d) / AGPL-3.0 sec 13 corresponding-source offer ----
+_src = ('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<title>SUNMAP | Source and Open-Source Licenses</title>'
+        '<meta name="description" content="Complete Corresponding Source and license information '
+        'for the open-source components SUNMAP serves (Swiss Ephemeris, AGPL-3.0).">'
+        '<link rel="canonical" href="' + SITE + 'source.html">'
+        '<link rel="icon" type="image/svg+xml" sizes="any" href="' + BASE + 'favicon.svg">'
+        '<link rel="icon" type="image/x-icon" href="' + BASE + 'favicon.ico">'
+        '<style>'
+        'body{background:#000;color:#fff;font-family:ui-monospace,Menlo,monospace;line-height:1.75;'
+        'margin:0;padding:48px clamp(20px,6vw,80px);max-width:860px}'
+        'a{color:#fff}h1{font-size:26px;letter-spacing:.04em;margin:0 0 6px}'
+        'h2{font-size:14px;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.6);'
+        'margin:34px 0 10px;border-top:1px solid rgba(255,255,255,.15);padding-top:20px}'
+        'p,li{color:rgba(255,255,255,.72);font-size:13px}ul{padding-left:18px}'
+        'code{color:#fff;background:rgba(255,255,255,.08);padding:1px 5px;border-radius:3px;font-size:12px}'
+        '.lead{color:rgba(255,255,255,.55);font-size:13px;margin-bottom:8px}'
+        '.dl{color:#fff;text-decoration:underline}</style></head><body>'
+        '<h1>Source &amp; Open-Source Licenses</h1>'
+        '<p class="lead">SUNMAP is a product of PUDDY Inc. It runs open-source software on your '
+        'device; this page provides the corresponding source and licenses, as those licenses '
+        'require.</p>'
+        '<h2>What runs on your device</h2>'
+        '<p>SUNMAP computes your whole solar and lunar day in your browser using the '
+        '<b>Swiss Ephemeris</b> astronomical library (&copy; Astrodienst AG), compiled to '
+        'WebAssembly by the <code>swisseph-wasm</code> package (&copy; 2024 prolaxu). SUNMAP uses '
+        'the Swiss Ephemeris <b>unmodified</b>, under its free <b>GNU Affero General Public License '
+        'v3.0 (AGPL-3.0)</b> option - not the paid commercial license. The <code>swisseph-wasm</code> '
+        'wrapper is licensed <b>GPL-3.0-or-later</b>. SUNMAP\'s own code that drives the engine '
+        '(<code>sunmap-worker.js</code>) forms a combined work with it and is likewise licensed '
+        '<b>AGPL-3.0-or-later</b> (&copy; 2026 PUDDY Inc.)</p>'
+        '<h2>Complete Corresponding Source</h2>'
+        '<p>In accordance with GPL-3.0 section 6(d) and AGPL-3.0 section 13, the corresponding '
+        'source is available here at no charge. The running binary and our calling code are served '
+        'directly from this site:</p><ul>'
+        '<li>The running binary: <a href="' + BASE + 'vendor/sweph/swisseph.wasm">swisseph.wasm</a>, '
+        '<a href="' + BASE + 'vendor/sweph/swisseph.js">swisseph.js</a>, '
+        '<a href="' + BASE + 'vendor/sweph/LICENSE.txt">upstream LICENSE</a>, '
+        '<a href="' + BASE + 'vendor/sweph/SOURCES.md">SOURCES.md</a> (versions and rebuild steps)</li>'
+        '<li>Our code: <a href="' + BASE + 'sunmap-worker.js">sunmap-worker.js</a> (the AGPL combined '
+        'work), <a href="' + BASE + 'sunmap-geo.js">sunmap-geo.js</a></li></ul>'
+        '<p>The Swiss Ephemeris 2.10.03 C source and the <code>swisseph-wasm</code> package source '
+        'with its Emscripten build script are available on written request at no charge: '
+        '<b>legal@puddystudios.com</b>. They are also published upstream at the links below.</p>'
+        '<p class="lead" style="color:rgba(255,255,255,.6)">A note on the bundled '
+        '<a href="' + BASE + 'vendor/sweph/LICENSE.txt">vendor/sweph/LICENSE.txt</a>: that file is '
+        'the <code>swisseph-wasm</code> wrapper author\'s older license summary (&copy; 2024 prolaxu). '
+        'It describes the Swiss Ephemeris as free for non-commercial use with a commercial license '
+        'required otherwise. That summary predates Astrodienst\'s relicensing of the Swiss Ephemeris '
+        'under the GNU Affero General Public License. SUNMAP\'s governing terms are <b>AGPL-3.0</b>, '
+        'and SUNMAP complies by providing the corresponding source above and on request.</p>'
+        '<h2>Upstream provenance</h2><ul>'
+        '<li>Swiss Ephemeris 2.10.03 - Astrodienst AG: '
+        '<a href="https://www.astro.com/swisseph/">astro.com/swisseph</a>, '
+        '<a href="https://github.com/aloistr/swisseph">github.com/aloistr/swisseph</a> (tag v2.10.03)</li>'
+        '<li><code>swisseph-wasm</code> 0.0.5: '
+        '<a href="https://github.com/prolaxu/swisseph-wasm">github.com/prolaxu/swisseph-wasm</a>, '
+        '<a href="https://www.npmjs.com/package/swisseph-wasm">npm</a></li>'
+        '<li>Full license texts: '
+        '<a href="https://www.gnu.org/licenses/agpl-3.0.txt">AGPL-3.0</a>, '
+        '<a href="https://www.gnu.org/licenses/gpl-3.0.txt">GPL-3.0</a></li></ul>'
+        '<h2>Ephemeris data</h2>'
+        '<p>The engine reads Swiss Ephemeris data files (<code>seas_18.se1</code>, '
+        '<code>semo_18.se1</code>, <code>sepl_18.se1</code>). These are astronomical data, not '
+        'program source; SUNMAP serves them at <a href="' + BASE + 'data/ephe/seas_18.se1">/data/ephe/</a> '
+        'and Astrodienst publishes them at '
+        '<a href="https://www.astro.com/ftp/swisseph/ephe/">astro.com/ftp/swisseph/ephe</a>.</p>'
+        '<h2>The rest of SUNMAP</h2>'
+        '<p>The remainder of this website (the page, design, and other tooling) is proprietary '
+        'and is merely aggregated with the open-source components above; it does not link into them. '
+        'All engine interaction is isolated behind the AGPL-licensed worker.</p>'
+        '<p style="margin-top:30px"><a href="' + BASE + '">Back to SUNMAP</a> &middot; '
+        'Source requests: legal@puddystudios.com</p>'
+        '</body></html>')
+(SUN / 'source.html').write_text(_src)
+print('wrote sitemap.xml (1 URL, image extension) + robots.txt + 404.html + source.html')
+
+# ---------------- PWA: manifest.json + sw.js ----------------
+_manifest = {
+    'name': 'SUNMAP',
+    'short_name': 'SUNMAP',
+    'description': ('Sunrise, sunset, twilight, golden hour and the Moon - Timed to the second on '
+                    'the Swiss Ephemeris engine, solved on your device for exactly where you '
+                    'stand. A Puddy Studios tool.'),
+    'id': BASE,
+    'start_url': BASE,
+    'scope': BASE,
+    'display': 'standalone',
+    'orientation': 'any',
+    'background_color': '#000000',
+    'theme_color': '#000000',
+    'lang': 'en',
+    'categories': ['utilities', 'lifestyle', 'education'],
+    'icons': [
+        {'src': f'{BASE}icons/icon-192.png', 'sizes': '192x192', 'type': 'image/png', 'purpose': 'any'},
+        {'src': f'{BASE}icons/icon-512.png', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'any'},
+        {'src': f'{BASE}icons/icon-maskable-512.png', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'},
+    ],
+    'screenshots': [
+        {'src': f'{BASE}og/sunmap-og.png', 'sizes': '2400x1260', 'type': 'image/png', 'form_factor': 'wide',
+         'label': 'SUNMAP - Sunrise, Sunset and Twilight to the Second'},
+    ],
+}
+_manifest_text = _json.dumps(_manifest, ensure_ascii=False, indent=2) + '\n'
+(SUN / 'manifest.json').write_text(_manifest_text)
+
+_h = _hashlib.sha1()
+_h.update(_hub_html.encode('utf-8'))
+_h.update(_manifest_text.encode('utf-8'))
+for _dep in ('sunmap-worker.js', 'sunmap-geo.js'):
+    _dp = SUN / _dep
+    if _dp.exists():
+        _h.update(_dp.read_bytes())
+_ver = _h.hexdigest()[:10]
+
+_SW = r"""/* SUNMAP service worker - generated by scripts/render.py, do not hand-edit. */
+'use strict';
+var VERSION = '__VER__';
+var CACHE = 'sunmap-' + VERSION;
+var EXT = 'sunmap-ext';
+var CORE = [
+  '__BB__',
+  '__BB__index.html',
+  '__BB__manifest.json',
+  '__BB__sunmap-worker.js',
+  '__BB__sunmap-geo.js',
+  '__BB__favicon.svg'
+];
+/* Everything the on-device engine needs to run with no network, plus the root
+   chrome, the OG card and the icons. Cached TOLERANTLY: any one of these
+   missing must not fail the install, and the icons + OG card are not generated
+   yet. Once they are cached, SUNMAP solves any day fully offline. */
+var EXTRAS = [
+  '/puddy-tools.js?v=15', '/puddy-logo.svg', '__BB__og/sunmap-og.png',
+  '__BB__vendor/sweph/swisseph.js', '__BB__vendor/sweph/swisseph.wasm',
+  '__BB__data/ephe/seas_18.se1', '__BB__data/ephe/semo_18.se1', '__BB__data/ephe/sepl_18.se1',
+  '__BB__icons/icon-192.png', '__BB__icons/icon-512.png',
+  '__BB__icons/icon-maskable-512.png', '__BB__icons/icon-180.png',
+  '__BB__icons/icon-32.png', '__BB__icons/icon-16.png'
+];
+
+self.addEventListener('install', function (e) {
+  e.waitUntil(
+    caches.open(CACHE).then(function (c) {
+      /* cache:'reload' bypasses the browser HTTP cache so installs always
+         snapshot fresh-from-edge, never a stale disk-cached copy. */
+      return c.addAll(CORE.map(function (u) { return new Request(u, { cache: 'reload' }); })).then(function () {
+        return Promise.allSettled(EXTRAS.map(function (u) { return c.add(new Request(u, { cache: 'reload' })); }));
+      });
+    }).then(function () { return self.skipWaiting(); })
+  );
+});
+
+self.addEventListener('activate', function (e) {
+  e.waitUntil(
+    caches.keys().then(function (keys) {
+      return Promise.all(keys.filter(function (k) {
+        return k.indexOf('sunmap-') === 0 && k !== CACHE && k !== EXT;
+      }).map(function (k) { return caches.delete(k); }));
+    }).then(function () { return self.clients.claim(); })
+  );
+});
+
+function swr(req, cacheName) {
+  return caches.open(cacheName).then(function (c) {
+    return c.match(req).then(function (hit) {
+      /* no-cache = revalidate against the edge (conditional GET), so the
+         background refresh can never re-absorb a stale browser-cache copy. */
+      var refresh = fetch(req, { cache: 'no-cache' }).then(function (res) {
+        if (res && res.ok) c.put(req, res.clone());
+        return res;
+      }).catch(function () { return hit; });
+      return hit || refresh;
+    });
+  });
+}
+
+self.addEventListener('fetch', function (e) {
+  var req = e.request;
+  if (req.method !== 'GET') return;
+  var url = new URL(req.url);
+
+  /* Page navigations: network-first so new builds land immediately; cached page offline. */
+  if (req.mode === 'navigate') {
+    e.respondWith(
+      fetch(req, { cache: 'no-cache' }).then(function (res) {
+        if (res && res.ok) {
+          var copy = res.clone();
+          caches.open(CACHE).then(function (c) { c.put(req, copy); });
+        }
+        return res;
+      }).catch(function () {
+        return caches.match(req).then(function (hit) {
+          return hit || caches.match('__BB__').then(function (hub) {
+            return hub || caches.match('__BB__index.html');
+          });
+        });
+      })
+    );
+    return;
+  }
+
+  /* Same-origin assets (the engine, the ephemerides, icons, OG, chrome): stale-while-revalidate. */
+  if (url.origin === self.location.origin) {
+    e.respondWith(swr(req, CACHE));
+    return;
+  }
+
+  /* Webfonts (Google Fonts / Fontshare): cache so the installed app keeps its type offline. */
+  if (/fonts\.googleapis\.com|fonts\.gstatic\.com|api\.fontshare\.com|cdn\.fontshare\.com/.test(url.host)) {
+    e.respondWith(swr(req, EXT));
+  }
+});
+"""
+(SUN / 'sw.js').write_text(_SW.replace('__VER__', _ver).replace('__BB__', BASE))
+print(f'wrote manifest.json + sw.js (cache sunmap-{_ver})')

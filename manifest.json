@@ -1,0 +1,47 @@
+{
+  "name": "SUNMAP",
+  "short_name": "SUNMAP",
+  "description": "Sunrise, sunset, twilight, golden hour and the Moon - Timed to the second on the Swiss Ephemeris engine, solved on your device for exactly where you stand. A Puddy Studios tool.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "lang": "en",
+  "categories": [
+    "utilities",
+    "lifestyle",
+    "education"
+  ],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/og/sunmap-og.png",
+      "sizes": "2400x1260",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "SUNMAP - Sunrise, Sunset and Twilight to the Second"
+    }
+  ]
+}
