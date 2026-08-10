@@ -28,8 +28,15 @@ true first instant rather than a local time that does not exist.
 
 Every event key in LADDER appears in `events` on every day, always. An event
 that does not occur carries `utc: null`, `local: null` and a status that says
-why. An event that occurs twice inside a 25-hour fall-back day appears twice.
-Nothing is ever silently dropped, and no time is ever invented.
+why. An event that occurs twice inside one local day appears twice - which
+happens on a 25-hour fall-back day, and also near a polar boundary where the
+event drifts across midnight. Nothing is ever silently dropped, and no time is
+ever invented.
+
+Holding that true takes more than asking Swiss. swe_rise_trans steps over an
+event that sits a few seconds past its search start, so every threshold event's
+occurrence LIST is reconciled against the body's measured altitude, on every
+day, not only on the days Swiss comes back empty. See _solve_window.
 
 
 STATUS VOCABULARY
@@ -55,7 +62,7 @@ altitude across the day, not by trusting a solver return code.
 """
 import argparse
 import json
-from datetime import date as _date, datetime, time as _time, timedelta, timezone
+from datetime import datetime, time as _time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -68,19 +75,30 @@ FLAGS = swe.FLG_SWIEPH
 
 # Geometric altitude of the body's CENTRE at the moment of each event, in
 # degrees. Used to classify a non-event honestly (always above vs always below)
-# and as the root function for the independent fallback solver.
-#   Sunrise/sunset: upper limb touching the horizon through standard refraction
-#   is a centre altitude of -50 arcmin.
-#   Twilights: the Swiss twilight bits are defined on the centre, unrefracted.
-#   Golden hour: an explicit centre altitude band, -4 deg to +6 deg.
-ALT_SUNRISE = -50.0 / 60.0        # -0.833333 deg
+# and as the root function for the fallback solver.
+#
+# The twilight and golden-hour thresholds are exact: swe_rise_trans lands on
+# them to better than 0.1 arcsec, measured.
+#
+# Rise and set are not a constant. The threshold is minus the sum of the
+# body's semidiameter and the refraction at the horizon, the semidiameter
+# moves with distance, and the refraction swe_rise_trans applies depends on
+# the observer's altitude through an internal pressure model that the public
+# refraction API does not expose. So RISE_SET is a sentinel: the threshold is
+# calibrated from Swiss itself per site. See _AltitudeTrack._refraction.
+RISE_SET = None
 ALT_CIVIL = -6.0
 ALT_NAUTICAL = -12.0
 ALT_ASTRO = -18.0
 GOLDEN_LOW = -4.0
 GOLDEN_HIGH = 6.0
 
-REFRACTION_AT_HORIZON = 34.0 / 60.0   # 0.566667 deg, for the Moon's threshold
+# The refraction swe_rise_trans uses at sea level, measured from the engine
+# itself: 36.739 arcmin, constant to 0.002 arcmin across latitude, season and
+# body. Only used when calibration cannot run, which is deep inside a polar
+# day or night where the nearest rise or set is weeks away and the body is
+# degrees clear of the horizon anyway.
+DEFAULT_HORIZON_REFRACTION = 36.739 / 60.0
 
 RISE, SET, TRANSIT_UP, TRANSIT_DOWN = "rise", "set", "transit_up", "transit_down"
 
@@ -93,11 +111,11 @@ LADDER = [
     ("nautical_dawn",        "Nautical dawn",      "sun",  RISE,          "rsmi", swe.CALC_RISE | swe.BIT_NAUTIC_TWILIGHT, ALT_NAUTICAL),
     ("civil_dawn",           "Civil dawn",         "sun",  RISE,          "rsmi", swe.CALC_RISE | swe.BIT_CIVIL_TWILIGHT,  ALT_CIVIL),
     ("golden_hour_start_am", "Golden hour begins", "sun",  RISE,          "alt",  GOLDEN_LOW,                              GOLDEN_LOW),
-    ("sunrise",              "Sunrise",            "sun",  RISE,          "rsmi", swe.CALC_RISE,                           ALT_SUNRISE),
+    ("sunrise",              "Sunrise",            "sun",  RISE,          "rsmi", swe.CALC_RISE,                           RISE_SET),
     ("golden_hour_end_am",   "Golden hour ends",   "sun",  RISE,          "alt",  GOLDEN_HIGH,                             GOLDEN_HIGH),
     ("solar_noon",           "Solar noon",         "sun",  TRANSIT_UP,    "rsmi", swe.CALC_MTRANSIT,                       None),
     ("golden_hour_start_pm", "Golden hour begins", "sun",  SET,           "alt",  GOLDEN_HIGH,                             GOLDEN_HIGH),
-    ("sunset",               "Sunset",             "sun",  SET,           "rsmi", swe.CALC_SET,                            ALT_SUNRISE),
+    ("sunset",               "Sunset",             "sun",  SET,           "rsmi", swe.CALC_SET,                            RISE_SET),
     ("golden_hour_end_pm",   "Golden hour ends",   "sun",  SET,           "alt",  GOLDEN_LOW,                              GOLDEN_LOW),
     ("civil_dusk",           "Civil dusk",         "sun",  SET,           "rsmi", swe.CALC_SET | swe.BIT_CIVIL_TWILIGHT,   ALT_CIVIL),
     ("nautical_dusk",        "Nautical dusk",      "sun",  SET,           "rsmi", swe.CALC_SET | swe.BIT_NAUTIC_TWILIGHT,  ALT_NAUTICAL),
@@ -117,6 +135,19 @@ BODY_ID = {"sun": swe.SUN, "moon": swe.MOON}
 # the next search does not re-find the same one.
 _SEC = 1.0 / 86400.0
 _NUDGE = 2.0 * _SEC
+
+# Two occurrences of the same event inside one local day are always close to 24
+# hours apart - the tightest pair measured over a year at seven sites is 23h45m.
+# So two times closer together than this are the same crossing reached two
+# different ways, never two events.
+_SAME_EVENT_S = 600.0
+
+# How far back swe_rise_trans has to be re-seeded before it will return an event
+# it stepped over. Measured at Reykjavik on 2026-06-30: the sunset was 1.8 s
+# past the search start, and seeding 5 s, 30 s, 120 s or 600 s earlier all
+# skipped it and returned the following day's. Seeding 30 minutes earlier found
+# it. The ladder runs out to six hours for margin.
+_RESEED_BACKOFF_S = (1800.0, 5400.0, 10800.0, 21600.0)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +212,8 @@ class _AltitudeTrack:
     threshold, the crossing is found here by bisection rather than lost.
     """
 
-    STEP_MIN = 2.0   # sampling step in minutes
+    STEP_MIN = 2.0      # altitude sampling step in minutes
+    SD_STEP_MIN = 30.0  # semidiameter sampling step in minutes
 
     def __init__(self, body, geo, jd0, jd1):
         self.body = body
@@ -193,6 +225,10 @@ class _AltitudeTrack:
         self.grid = [jd0 + (jd1 - jd0) * i / (n - 1) for i in range(n)]
         self.alt = [self.altitude(j) for j in self.grid]
         self._grid_cache = {}
+        self._refr = None
+        self._sd_step = self.SD_STEP_MIN / 1440.0
+        self._sd_n = max(2, int((jd1 - jd0) / self._sd_step) + 2)
+        self._sd_grid = [None] * self._sd_n
 
     def altitude(self, jd):
         """Geometric (unrefracted) topocentric altitude of the body's centre."""
@@ -203,20 +239,79 @@ class _AltitudeTrack:
         xaz = swe.azalt(jd, swe.EQU2HOR, self.geo, 0.0, 0.0, (xx[0], xx[1], xx[2]))
         return xaz[1]
 
-    def threshold(self, jd, thr):
-        """Threshold altitude at `jd`. Constant for the Sun, live for the Moon.
-
-        The Moon's rise/set threshold moves with its topocentric semidiameter
-        (its distance varies by 10 percent over a month), so it is recomputed
-        per sample instead of frozen at a mean value.
-        """
-        if thr is not None:
-            return thr
+    def semidiameter(self, jd):
+        """Topocentric apparent semidiameter of the body, in degrees."""
         lon, lat, alt_m = self.geo
         swe.set_topo(lon, lat, alt_m)
-        attr = swe.pheno_ut(jd, self.ipl, FLAGS | swe.FLG_TOPOCTR)
-        semidiameter = attr[3] / 2.0
-        return -(REFRACTION_AT_HORIZON + semidiameter)
+        return swe.pheno_ut(jd, self.ipl, FLAGS | swe.FLG_TOPOCTR)[3] / 2.0
+
+    def _sd(self, jd):
+        """Semidiameter by interpolation on a half-hourly grid.
+
+        The apparent size of the disc is the slowest-moving quantity in the
+        whole calculation, and asking Swiss for it at all 721 altitude samples
+        cost more than every other ephemeris call in the engine combined.
+        Sampled every 30 minutes and interpolated linearly it is good to about
+        0.06 arcsec for the Moon and a thousandth of that for the Sun, against
+        a horizon whose two competing definitions differ by 153 arcsec.
+
+        Outside the sampled span it falls through to the exact call: the
+        refraction calibration reaches up to 24 days away from the window.
+        """
+        i = int((jd - self.jd0) / self._sd_step)
+        if i < 0 or i + 1 >= self._sd_n:
+            return self.semidiameter(jd)
+        for k in (i, i + 1):
+            if self._sd_grid[k] is None:
+                self._sd_grid[k] = self.semidiameter(self.jd0 + k * self._sd_step)
+        frac = (jd - self.jd0) / self._sd_step - i
+        return self._sd_grid[i] + frac * (self._sd_grid[i + 1] - self._sd_grid[i])
+
+    def _refraction(self):
+        """The refraction component of Swiss's OWN rise/set threshold, here.
+
+        Calibrated rather than assumed. swe_rise_trans places rise and set at a
+        centre altitude of minus (refraction plus semidiameter); the
+        semidiameter is knowable, but the refraction depends on the observer's
+        altitude through an internal pressure model that the public refraction
+        API does not reproduce. So ask Swiss for a rise or set it CAN solve
+        near this day, measure the geometric centre altitude it chose, and
+        subtract the semidiameter. What is left is the refraction Swiss is
+        using at this site.
+
+        This is what keeps the fallback solver definitionally identical to the
+        primary one. Without it the two disagree by 10 to 30 seconds, and a
+        rescued sunset would sit visibly out of line with the sunsets on the
+        days either side of it.
+        """
+        if self._refr is not None:
+            return self._refr
+        mid = 0.5 * (self.jd0 + self.jd1) - 0.5
+        offsets = [0.0] + [s * k for k in range(1, 25) for s in (-1.0, 1.0)]
+        for offset in offsets:
+            for flag in (swe.CALC_RISE, swe.CALC_SET):
+                try:
+                    res, tret = swe.rise_trans(mid + offset, self.ipl, flag,
+                                               self.geo, 0.0, 0.0, FLAGS)
+                except Exception:  # noqa: BLE001
+                    continue
+                if res != 0:
+                    continue
+                # Measured with the same semidiameter function the threshold
+                # uses, so calibration and use cannot drift apart.
+                self._refr = -self.altitude(tret[0]) - self._sd(tret[0])
+                return self._refr
+        # Deep polar day or night: no rise or set within 24 days to calibrate
+        # against. The body is degrees clear of the horizon, so the sea-level
+        # constant is far more precision than the classification needs.
+        self._refr = DEFAULT_HORIZON_REFRACTION
+        return self._refr
+
+    def threshold(self, jd, thr):
+        """Threshold altitude at `jd`. Fixed for twilight, live for rise/set."""
+        if thr is not None:
+            return thr
+        return -(self._refraction() + self._sd(jd))
 
     def f(self, jd, thr):
         return self.altitude(jd) - self.threshold(jd, thr)
@@ -282,6 +377,24 @@ def _solve_one(jd_start, ipl, mode, rsmi_or_alt, direction, geo):
     return tret[0], 0, None
 
 
+def _reseed(target, ipl, mode, rsmi_or_alt, direction, geo, jd0, jd1):
+    """Ask Swiss again for an event it stepped over, seeding further back.
+
+    Returns Swiss's own instant for the crossing at `target`, or None if no
+    backoff produces it. Swiss is the oracle, so where it CAN be made to answer
+    its answer is preferred to the altitude track's; the track is only there to
+    prove the event exists and to say roughly when.
+    """
+    for back in _RESEED_BACKOFF_S:
+        jd, _ret, err = _solve_one(target - back * _SEC, ipl, mode,
+                                   rsmi_or_alt, direction, geo)
+        if err is not None or jd is None:
+            continue
+        if abs(jd - target) * 86400.0 <= _SAME_EVENT_S and jd0 <= jd < jd1:
+            return jd
+    return None
+
+
 def _solve_window(spec, jd0, jd1, geo, track_for):
     """All occurrences of one event inside [jd0, jd1). Returns (jds, status).
 
@@ -294,19 +407,28 @@ def _solve_window(spec, jd0, jd1, geo, track_for):
     -2 was reported as "circumpolar" even when the Sun plainly rose and set
     that day and it was only a twilight threshold that went unreached.
 
-    This walks the whole window instead, then decides an empty result by
-    measuring the sky rather than by trusting a return code.
+    This walks the whole window instead, RECONCILES what Swiss returned against
+    the measured altitude of the body, and only then decides what to say about
+    an empty result.
+
+    The reconciliation is unconditional, and that is the point. swe_rise_trans
+    steps over an event that sits a few seconds past its search start: at
+    Reykjavik on 2026-06-30 it skipped a sunset 1.8 s ahead of the cursor and
+    returned the day's OTHER sunset instead. Consulting the altitude track only
+    when Swiss came back empty misses exactly that case, because Swiss did not
+    come back empty - it came back one short, which looks identical to a normal
+    day from the outside.
     """
     key, _label, body, direction, mode, rsmi_or_alt, thr = spec
     ipl = BODY_ID[body]
 
     jds = []
-    cursor = jd0 - _SEC          # a hair early, so an event exactly at the
-    swiss_ret = None             # boundary instant is not stepped over
+    # A hair early, so an event exactly at the boundary instant is not
+    # stepped over.
+    cursor = jd0 - _SEC
     err = None
     for _ in range(8):           # a 25-hour day holds at most two of anything
-        jd, ret, err = _solve_one(cursor, ipl, mode, rsmi_or_alt, direction, geo)
-        swiss_ret = ret
+        jd, _ret, err = _solve_one(cursor, ipl, mode, rsmi_or_alt, direction, geo)
         if err is not None or jd is None:
             break
         if jd >= jd1:
@@ -319,20 +441,25 @@ def _solve_window(spec, jd0, jd1, geo, track_for):
 
     if err is not None:
         return [], "error: %s" % err
+
+    if direction in (TRANSIT_UP, TRANSIT_DOWN):
+        # A transit has no threshold, so there is nothing to measure against
+        # and nothing for Swiss to graze past. It always exists; the only
+        # honest empty answer is that none of them landed in this local day.
+        return (jds, "ok") if jds else ([], "none_today")
+
+    # Measure the sky, every time, and adopt any crossing Swiss did not report.
+    track = track_for(body)
+    for crossing in track.crossings(thr, direction):
+        if any(abs(crossing - j) * 86400.0 <= _SAME_EVENT_S for j in jds):
+            continue
+        recovered = _reseed(crossing, ipl, mode, rsmi_or_alt, direction, geo,
+                            jd0, jd1)
+        jds.append(recovered if recovered is not None else crossing)
+    jds.sort()
+
     if jds:
         return jds, "ok"
-
-    # Nothing from Swiss. Measure the day before saying anything about it.
-    if direction in (TRANSIT_UP, TRANSIT_DOWN):
-        # A transit always exists; the only honest empty answer is that none
-        # of them landed in this local day.
-        return [], "none_today"
-
-    track = track_for(body)
-    fallback = track.crossings(thr, direction)
-    if fallback:
-        # Swiss found nothing but the sky says otherwise. Trust the measurement.
-        return fallback, "ok"
 
     lo, hi = track.extrema(thr)
     if lo > 0.0:
@@ -341,7 +468,6 @@ def _solve_window(spec, jd0, jd1, geo, track_for):
         return [], "always_below"
     # The threshold is crossed inside the window, but not in this event's
     # direction: the matching crossing sits on the other side of midnight.
-    del swiss_ret
     return [], "none_today"
 
 
@@ -419,18 +545,18 @@ def _day_length(times, statuses, geo, jd0, jd1):
     rises, sets = times.get("sunrise") or [], times.get("sunset") or []
     if rises:
         sr = rises[0]
-        ss, ret, err = _solve_one(sr + _NUDGE, swe.SUN, "rsmi", swe.CALC_SET, SET, geo)
+        ss, _ret, _err = _solve_one(sr + _NUDGE, swe.SUN, "rsmi", swe.CALC_SET,
+                                    SET, geo)
         if ss is not None:
             return round((ss - sr) * 86400.0)
-        del ret, err
         return None
     if sets:
         ss = sets[0]
         # Walk forward from 36 hours back and keep the last sunrise before it.
         cursor, best = ss - 1.5, None
         for _ in range(4):
-            sr, ret, err = _solve_one(cursor, swe.SUN, "rsmi", swe.CALC_RISE, RISE, geo)
-            del ret, err
+            sr, _ret, _err = _solve_one(cursor, swe.SUN, "rsmi", swe.CALC_RISE,
+                                        RISE, geo)
             if sr is None or sr >= ss:
                 break
             best, cursor = sr, sr + _NUDGE
@@ -481,10 +607,11 @@ def _explain(event):
     hit = _HUMAN.get((body, key, status))
     if hit:
         return hit
+    who = "the Sun" if body == "sun" else "the Moon"
     if status == "always_above":
-        return "never reached - the Sun stays above this altitude all day"
+        return "never reached - %s stays above this altitude all day" % who
     if status == "always_below":
-        return "never reached - the Sun stays below this altitude all day"
+        return "never reached - %s stays below this altitude all day" % who
     if status == "none_today":
         return "does not fall inside this local day"
     return status

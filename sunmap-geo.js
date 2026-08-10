@@ -21,9 +21,20 @@
  * Plus honesty fields that are additive to the contract and safe to ignore:
  *     alt_source   "gps" | "dem" | "default"
  *     tz_source    "device" | "provider" | "table"
- *     tz_ref_km    distance to the tzdata reference point used, when inferred
+ *     tz_ref_km    distance to the tzdata reference point used, or null when
+ *                  no reference point was consulted (provider zone, device
+ *                  zone, or a country with exactly one zone). null means "no
+ *                  distance applies", never "zero distance".
  *     accuracy_m   horizontal accuracy when the provider reports one
  *     approx       true when the point is a city-centre reference, not the spot
+ *     tz_basis     "provider" | "device" | "country" | "country+nearest" |
+ *                  "nearest" - how firm the zone actually is
+ *
+ * RENDERING CONTRACT. label and sub originate in OpenStreetMap, which is
+ * user-editable, so treat them as untrusted text: render with textContent,
+ * never innerHTML. This module strips control and bidi-override characters and
+ * caps length at 120 chars, but it deliberately does NOT HTML-escape - escaping
+ * in a data layer only yields double-escaped text in a correct consumer.
  *     tz_conflict  the zone we rejected when two sources disagreed, else null
  *     from         how the observer was ORIGINALLY obtained, which survives
  *                  the reload that turns every source into "stored"
@@ -356,22 +367,22 @@ let userFix = null;
  * report the loser in tz_conflict so the UI can offer it. Silently picking
  * and hiding the disagreement is the one thing we will not do.
  */
-function deriveTz(lat, lon, hintTz, hintSource) {
+function deriveTz(lat, lon, hintTz, hintSource, countryCode) {
   if (validTz(hintTz)) {
-    return { tz: hintTz, tz_source: hintSource || 'provider', tz_ref_km: null, tz_conflict: null };
+    return { tz: hintTz, tz_source: hintSource || 'provider', tz_ref_km: null, tz_basis: 'provider', tz_conflict: null };
   }
-  const near = nearestTimeZone(lat, lon);
+  const near = zoneForPoint(lat, lon, countryCode);
   const dev = deviceTz();
   if (validTz(dev) && userFix && distKm(lat, lon, userFix.lat, userFix.lon) <= NEAR_KM) {
     const clash = (userFix.tz && validTz(userFix.tz) && userFix.tz !== dev) ? userFix.tz : null;
-    return { tz: dev, tz_source: 'device', tz_ref_km: null, tz_conflict: clash };
+    return { tz: dev, tz_source: 'device', tz_ref_km: null, tz_basis: 'device', tz_conflict: clash };
   }
   if (validTz(near.tz)) {
     // When the table and the browser agree we can call it device-grade.
     const src = (dev && dev === near.tz) ? 'device' : 'table';
-    return { tz: near.tz, tz_source: src, tz_ref_km: near.km, tz_conflict: null };
+    return { tz: near.tz, tz_source: src, tz_ref_km: near.km, tz_basis: near.basis, tz_conflict: null };
   }
-  return { tz: validTz(dev) ? dev : 'UTC', tz_source: validTz(dev) ? 'device' : 'table', tz_ref_km: null, tz_conflict: null };
+  return { tz: validTz(dev) ? dev : 'UTC', tz_source: validTz(dev) ? 'device' : 'table', tz_ref_km: null, tz_basis: 'device', tz_conflict: null };
 }
 
 /* ------------------------------------------------------------- storage --- */
@@ -396,7 +407,7 @@ export function getStored() {
     tz: validTz(g.tz) ? g.tz : null, label: typeof g.label === 'string' ? g.label : '',
     source: 'stored', from: g.from || g.source || null,
     alt_source: g.alt_source || 'default',
-    tz_source: g.tz_source, tz_ref_km: g.tz_ref_km,
+    tz_source: g.tz_source, tz_ref_km: g.tz_ref_km, tz_basis: g.tz_basis,
     accuracy_m: g.accuracy_m, approx: g.approx
   });
 }
@@ -443,6 +454,27 @@ function getJSON(url, timeoutMs) {
 
 /* ------------------------------------------------------------ providers --- */
 
+/* Neither Photon nor Nominatim returns a timezone, so every remote suggestion
+ * arrives zoneless. We resolve one HERE, at parse time, from the country code
+ * the provider DID return - the country constraint is the whole reason cc is
+ * carried, and a consumer that reads item.tz (index.html's normPlace does, and
+ * it drops cc on the floor) would otherwise fall back to the DEVICE zone and
+ * render Tokyo's sunrise labelled America/Los_Angeles.
+ *
+ * The zone is stamped with its own provenance so nothing downstream can mistake
+ * our inference for a provider lookup: tz_source "table", plus the basis and
+ * the reference distance from zoneForPoint. chooseLocation deliberately
+ * re-derives rather than trusting this, so the near-user device override still
+ * wins for a point the OS actually knows about. */
+function withZone(item) {
+  const z = zoneForPoint(item.lat, item.lon, item.cc);
+  item.tz = validTz(z.tz) ? z.tz : null;
+  item.tz_source = item.tz ? 'table' : null;
+  item.tz_basis = item.tz ? z.basis : null;
+  item.tz_ref_km = item.tz ? z.km : null;
+  return item;
+}
+
 /** Photon (komoot, OpenStreetMap). Built for type-ahead, keyless, CORS open.
  *  Biased to the stored observer so short queries resolve locally first. */
 function photonSuggest(q) {
@@ -455,12 +487,12 @@ function photonSuggest(q) {
     const street = (p.street && p.housenumber) ? (p.housenumber + ' ' + p.street) : p.street;
     const parts = [street, p.district, p.locality, p.city, p.county, p.state, p.postcode, p.country]
       .filter((x, i, arr) => x && x !== p.name && arr.indexOf(x) === i);
-    return {
-      label: p.name || parts[0] || q,
-      sub: parts.join(', '),
+    return withZone({
+      label: cleanText(p.name || parts[0] || q),
+      sub: cleanText(parts.join(', ')),
       lat: Number(c[1]), lon: Number(c[0]),
-      tz: null, source: 'photon', approx: false
-    };
+      cc: p.countrycode || '', source: 'photon', approx: false
+    });
   }).filter(usableItem));
 }
 
@@ -468,12 +500,13 @@ function photonSuggest(q) {
  *  type-ahead API. The browser's own User-Agent and Referer identify us; no
  *  key, no email parameter (personal contact never goes on the wire).
  *
- *  ONE ENVIRONMENT TRAP, measured 2026-08-09: Nominatim answers 403 "Access
- *  denied" to any request whose User-Agent is not browser-grade, so a Node or
- *  curl harness sees this leg return nothing while the shipped browser build
- *  gets a clean 200 with Access-Control-Allow-Origin *. If you are testing
- *  outside a browser and the fallback looks dead, check the status code before
- *  concluding the code is broken. */
+ *  MEASURED 2026-08-09, both from curl's default User-Agent and from a browser
+ *  one: HTTP 200, Access-Control-Allow-Origin *, jsonv2 with addressdetails.
+ *  An earlier note in this file claimed Nominatim 403s every non-browser
+ *  User-Agent; re-measurement did not reproduce that, so do NOT dismiss a
+ *  failure here as a harness artifact. Nominatim does rate-limit and does
+ *  block abusive agents, so a 403 or 429 means we are being throttled and the
+ *  Photon-first ordering is what keeps that off the hot path. */
 function nominatimSuggest(q) {
   const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1'
             + '&accept-language=en&limit=8&q=' + encodeURIComponent(q);
@@ -486,12 +519,12 @@ function nominatimSuggest(q) {
     // so 1600 Pennsylvania Avenue reads "White House" the way Photon would.
     const named = (typeof d.name === 'string' && d.name.trim() && d.name !== a.road) ? d.name.trim() : '';
     const head = named || street;
-    return {
-      label: String(head).trim(),
-      sub: dn.split(',').slice(1, 5).join(',').trim(),
+    return withZone({
+      label: cleanText(head),
+      sub: cleanText(dn.split(',').slice(1, 5).join(',')),
       lat: Number(d.lat), lon: Number(d.lon),
-      tz: null, source: 'nominatim', approx: false
-    };
+      cc: String(a.country_code || '').toUpperCase(), source: 'nominatim', approx: false
+    });
   }).filter(usableItem));
 }
 
@@ -502,6 +535,34 @@ function remoteSuggest(q) {
   return photonSuggest(q)
     .then(res => (res && res.length) ? res : nominatimSuggest(q).catch(() => []))
     .catch(() => nominatimSuggest(q).catch(() => []));
+}
+
+/* --------------------------------------------------------- untrusted text --
+ * OpenStreetMap names are USER-EDITABLE. Photon and Nominatim hand back
+ * whatever an OSM contributor typed, and this module's output goes straight
+ * into the DOM and into localStorage. Three real hazards, all measured against
+ * live provider shapes rather than imagined:
+ *
+ *   1. Markup. We do not escape here, because escaping in a data layer just
+ *      produces double-escaped text in a correct consumer. The contract is:
+ *      RENDER label AND sub WITH textContent, NEVER innerHTML. Enforced today
+ *      in sun_map/index.html, which contains zero innerHTML.
+ *   2. Bidi and control characters. A U+202E RIGHT-TO-LEFT OVERRIDE inside a
+ *      place name visually reverses everything after it, including a
+ *      coordinate readout rendered on the same line. textContent does not save
+ *      you from that one, so it is stripped here.
+ *   3. Length. An unbounded name breaks layout and bloats the persisted
+ *      observer. A 4030-character label was passed through verbatim before
+ *      this cap existed.
+ */
+const BIDI_AND_CONTROL =
+  /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+const TEXT_MAX = 120;
+
+function cleanText(s) {
+  if (typeof s !== 'string') return '';
+  const t = s.replace(BIDI_AND_CONTROL, ' ').replace(/\s+/g, ' ').trim();
+  return t.length > TEXT_MAX ? t.slice(0, TEXT_MAX - 3).trimEnd() + '...' : t;
 }
 
 /** The defensive guard STARMAP learned to need: a suggestion with no usable
@@ -644,8 +705,10 @@ function normalizeLocation(raw) {
   const lat = round(Number(raw.lat), 6);
   const lon = round(Number(raw.lon), 6);
   const z = (raw.tz && validTz(raw.tz))
-    ? { tz: raw.tz, tz_source: raw.tz_source || 'provider', tz_ref_km: raw.tz_ref_km == null ? null : raw.tz_ref_km, tz_conflict: null }
-    : deriveTz(lat, lon, null, null);
+    ? { tz: raw.tz, tz_source: raw.tz_source || 'provider',
+        tz_ref_km: raw.tz_ref_km == null ? null : raw.tz_ref_km,
+        tz_basis: raw.tz_basis || (raw.tz_source === 'table' ? 'table' : 'provider'), tz_conflict: null }
+    : deriveTz(lat, lon, null, null, raw.cc);
   const altNum = Number(raw.alt);
   const alt = isFinite(altNum) ? round(altNum, 1) : 0;
   return {
@@ -653,7 +716,10 @@ function normalizeLocation(raw) {
     lon: lon,
     alt: alt,
     tz: z.tz,
-    label: (typeof raw.label === 'string' && raw.label.trim()) ? raw.label.trim() : labelFor(lat, lon, z.tz),
+    // cleanText again, not only at the provider parse: a label can also arrive
+    // from a caller-built object or from a localStorage entry written by an
+    // older build, and neither has been through the provider path.
+    label: cleanText(raw.label) || labelFor(lat, lon, z.tz),
     source: raw.source || 'search',
     alt_source: raw.alt_source || (alt ? 'gps' : 'default'),
     tz_source: z.tz_source,
@@ -662,6 +728,7 @@ function normalizeLocation(raw) {
     // explicitly or "unknown" silently becomes a confident "0 metres".
     accuracy_m: (raw.accuracy_m != null && isFinite(raw.accuracy_m)) ? Math.round(raw.accuracy_m) : null,
     approx: !!raw.approx,
+    tz_basis: z.tz_basis || null,
     tz_conflict: raw.tz_conflict || z.tz_conflict || null,
     // How this observer was ORIGINALLY obtained. `source` becomes "stored" on
     // the next page load, so without this the fact that it came from GPS is
@@ -715,18 +782,25 @@ export function chooseLocation(item, opts) {
     throw new Error('chooseLocation: an item with finite lat and lon is required');
   }
   const o = opts || {};
-  // An offline suggestion's zone comes from our own tzdata table, not from a
-  // provider, and its point IS that table's reference point - so it is labelled
-  // "table" at zero distance rather than passed off as a lookup.
-  const fromTable = item.source === 'offline';
+  // A zone is passed straight through ONLY when a provider actually supplied
+  // it. Our own table-derived zones (offline picks, and the one withZone()
+  // stamps on every remote suggestion) are re-derived instead, so the near-user
+  // device override and the country constraint both still get their say. The
+  // test is the item's declared provenance, never a guess from item.source -
+  // a suggestion that says "table" must not be re-labelled "provider" one
+  // function call later.
+  const ourOwn = item.tz_source === 'table' || item.source === 'offline';
+  const providerTz = (item.tz && !ourOwn) ? item.tz : null;
   const loc = normalizeLocation({
     lat: item.lat,
     lon: item.lon,
     alt: isFinite(item.alt) ? item.alt : 0,
     alt_source: isFinite(item.alt) && item.alt !== 0 ? (item.alt_source || 'gps') : 'default',
-    tz: item.tz,
-    tz_source: item.tz ? (fromTable ? 'table' : 'provider') : undefined,
-    tz_ref_km: item.tz && fromTable ? 0 : undefined,
+    tz: providerTz,
+    cc: item.cc,
+    tz_source: providerTz ? 'provider' : undefined,
+    tz_basis: providerTz ? 'provider' : undefined,
+    tz_ref_km: undefined,
     label: item.label,
     source: o.source || 'search',
     approx: !!item.approx
@@ -809,7 +883,7 @@ export function useIPLocation() {
       // circle - which is exactly why an IP fix is never the final observer.
       const km = parseFloat(j && j.accuracy);
       return {
-        lat: la, lon: lo, tz: j.timezone || '',
+        lat: la, lon: lo, tz: j.timezone || '', cc: j.country_code || '',
         label: ((j.city ? j.city + ', ' : '') + (j.region || j.country || '')).trim().replace(/,$/, '') || 'Your area',
         accuracy_m: isFinite(km) ? km * 1000 : null
       };
@@ -819,7 +893,7 @@ export function useIPLocation() {
       const la = parseFloat(ll[0]), lo = parseFloat(ll[1]);
       if (!isFinite(la) || !isFinite(lo)) throw new Error('ipinfo: no coordinates');
       return {
-        lat: la, lon: lo, tz: j.timezone || '',
+        lat: la, lon: lo, tz: j.timezone || '', cc: j.country || '',
         label: ((j.city ? j.city + ', ' : '') + (j.region || j.country || '')).trim().replace(/,$/, '') || 'Your area',
         accuracy_m: null
       };
@@ -828,7 +902,7 @@ export function useIPLocation() {
       userFix = { lat: g.lat, lon: g.lon, tz: validTz(g.tz) ? g.tz : '' };
       const loc = normalizeLocation({
         lat: g.lat, lon: g.lon, alt: 0, alt_source: 'default',
-        tz: g.tz, tz_source: 'provider',
+        tz: g.tz, tz_source: 'provider', cc: g.cc,
         label: g.label, source: 'ip',
         accuracy_m: g.accuracy_m, approx: true
       });
@@ -908,6 +982,34 @@ export function initLocation(options) {
 
 /** Number of tzdata zones in the on-device table. Exposed for diagnostics. */
 export const ZONE_COUNT = Object.keys(ZONE_POS).length;
+
+/* ------------------------------------------------------- consumer aliases --
+ * sun_map/index.html binds this module by DUCK-TYPING: bindGeo() probes a list
+ * of candidate export names and takes the first that is a function.
+ *   device/IP chain: ['here','locate','device','deviceLocation', ...]
+ *   zone resolver:   ['timezoneFor','tzFor','zoneFor','nearestZone', ...]
+ * The canonical names below (useDeviceLocation, zoneForPoint) match NEITHER
+ * list, so both seams silently bound to null: the locate button bypassed this
+ * module for a bare navigator.geolocation call that dead-ends when GPS is
+ * denied, and every remote pick fell back to the DEVICE timezone. These two
+ * aliases close that without editing a file this lane does not own. Keep them.
+ * Note the probe list puts 'search' AHEAD of 'suggest' - do NOT export a
+ * function named `search`, or it would silently displace the debounced
+ * suggest() the page currently binds.
+ */
+
+/** Alias of useDeviceLocation: GPS first, IP chain on any failure. */
+export const locate = useDeviceLocation;
+
+/** Zone id for a point as a plain STRING (the duck-typed consumer feeds the
+ *  result straight to a validity check, so an object would be discarded).
+ *  Returns null when nothing resolves. Use zoneForPoint when you also want the
+ *  basis and the reference distance - which you should, before showing a zone
+ *  to a user as if it were looked up. */
+export function zoneFor(lat, lon, countryCode) {
+  const z = zoneForPoint(lat, lon, countryCode);
+  return validTz(z.tz) ? z.tz : null;
+}
 
 /* ---------------------------------------- country-constrained zone lookup --
  * Nearest-reference-point alone is wrong wherever a country's reference city
@@ -1083,7 +1185,11 @@ const CC_ZONES = {
  */
 export function zoneForPoint(lat, lon, countryCode) {
   const pool = CC_ZONES[String(countryCode || '').toUpperCase()];
-  if (pool && pool.length === 1) return { tz: pool[0][0], km: 0, basis: 'country' };
+  // km is null, not 0, when the country decides it: no reference point was
+  // consulted, so there is no distance to report. Reporting 0 would be a
+  // measurement we never took - Norway resolves to Europe/Berlin correctly,
+  // and Berlin's reference point is about 2000 km from Tromso.
+  if (pool && pool.length === 1) return { tz: pool[0][0], km: null, basis: 'country' };
   if (pool && pool.length > 1) {
     let best = null, bestKm = Infinity;
     for (const row of pool) {

@@ -12,270 +12,711 @@
  * Complete Corresponding Source: https://sunmap.puddystudios.com/source.html
  */
 
-/* Every event SUNMAP shows is topocentric: a sunrise is a statement about one
- * observer on one patch of ground. So the engine runs here, on the device, and
- * no coordinate is ever sent anywhere.
+/* SUNMAP - the solar and lunar day, solved on the device.
+ *
+ * Every event here is topocentric: a sunrise is a statement about one observer
+ * on one patch of ground. So the engine runs in the browser and no coordinate
+ * is ever sent anywhere.
+ *
+ * This is a port of scripts/solar.py onto the Swiss Ephemeris WASM build in
+ * vendor/sweph/ - same 2.10.03 core, same JPL DE441 .se1 files, same call
+ * sequence, same day model. The JSON it emits is interchangeable with the JSON
+ * solar.py emits, so the page can consume either.
  *
  * In:  { base, coords:{lat,lon,alt}, date:"YYYY-MM-DD", tz:"IANA/Zone", moon:bool }
  * Out: { ok:true, result:<day result>, ms } | { ok:false, error }
- * The day result is shape-identical to scripts/solar.py's JSON.
+ *
+ * THE DAY MODEL, and why each piece is shaped the way it is:
+ *
+ *   - A day is the half-open interval from the first instant of the local date
+ *     to the first instant of the next, found by BISECTION on the predicate
+ *     "the local date at this instant is at or past the target". That is
+ *     monotonic in every real zone, so it survives DST gaps (a zone that skips
+ *     00:00 - Santiago, Havana - has no local midnight at all, and this returns
+ *     01:00, the day's true first instant), DST overlaps, and historical offset
+ *     changes. A spring-forward day is 23 hours and a fall-back day is 25.
+ *     The zone is read from Intl, never from the host's own clock.
+ *
+ *   - Every key in LADDER appears in `events` on every day. An event that does
+ *     not occur carries null times and a status saying why. An event that
+ *     occurs TWICE inside a 25-hour fall-back day appears twice. Nothing is
+ *     silently dropped and no time is ever invented.
+ *
+ *   - always_above / always_below are decided by MEASURING the body's altitude
+ *     across the day on a two-minute grid, not by trusting a Swiss return code.
+ *     The same track backstops the solver: if Swiss reports nothing but the sky
+ *     crossed the threshold, the crossing is bisected out of the track instead
+ *     of being lost. The track is built lazily, so an ordinary mid-latitude day
+ *     never pays for it.
+ *
+ *   - The rise/set threshold is CALIBRATED FROM SWISS, not assumed. Swiss puts
+ *     rise and set at a centre altitude of minus (refraction + semidiameter);
+ *     the semidiameter is knowable and moves with distance, but the refraction
+ *     depends on the observer's altitude through an internal pressure model the
+ *     public API does not expose. So the track asks Swiss for a rise or set it
+ *     CAN solve near this day and reads the refraction back out of the answer.
+ *     Without this the fallback and the primary solver disagree by 10 to 60
+ *     seconds and a rescued sunset sits out of line with the days either side.
+ *
+ *   - The moon block is TOPOCENTRIC: the Moon overhead is about 1.7 percent
+ *     wider than the Moon on the geocentric books, and apparent_diameter_arcsec
+ *     should mean what the observer would actually measure.
+ *
+ *   - Timestamps round to the millisecond and render the way Python's
+ *     datetime.isoformat() renders them: six fractional digits when the
+ *     microsecond field is non-zero, none at all when it is zero.
+ *
+ * `moon:false` skips the four lunar LADDER rows for speed. The moon
+ * illumination block is always present - it is one cheap call and the data
+ * contract requires the field.
  */
 'use strict';
 
+/* ------------------------------------------------------------- Swiss consts */
+
 const SUN = 0, MOON = 1;
 const FLG_SWIEPH = 2;
+const FLG_EQUATORIAL = 2048;
+const FLG_TOPOCTR = 32768;
+const EQU2HOR = 1;
+const GREG_CAL = 1;
 
 const CALC_RISE = 1, CALC_SET = 2, CALC_MTRANSIT = 4, CALC_ITRANSIT = 8;
 const BIT_DISC_CENTER = 256, BIT_NO_REFRACTION = 512;
 const BIT_CIVIL = 1024, BIT_NAUTIC = 2048, BIT_ASTRO = 4096;
 
-// The ladder, mirroring scripts/solar.py exactly.
-const SUN_EVENTS = [
-  ['astronomical_dawn', 'Astronomical dawn', CALC_RISE | BIT_ASTRO],
-  ['nautical_dawn',     'Nautical dawn',     CALC_RISE | BIT_NAUTIC],
-  ['civil_dawn',        'Civil dawn',        CALC_RISE | BIT_CIVIL],
-  ['sunrise',           'Sunrise',           CALC_RISE],
-  ['solar_noon',        'Solar noon',        CALC_MTRANSIT],
-  ['sunset',            'Sunset',            CALC_SET],
-  ['civil_dusk',        'Civil dusk',        CALC_SET | BIT_CIVIL],
-  ['nautical_dusk',     'Nautical dusk',     CALC_SET | BIT_NAUTIC],
-  ['astronomical_dusk', 'Astronomical dusk', CALC_SET | BIT_ASTRO],
-  ['solar_midnight',    'Solar midnight',    CALC_ITRANSIT],
+const EPHE_FILES = ['seas_18.se1', 'semo_18.se1', 'sepl_18.se1'];
+
+/* Geometric altitude of the body's CENTRE at each event, in degrees. Used to
+ * classify a non-event honestly and as the root function for the fallback
+ * solver.
+ *
+ * The twilight and golden-hour thresholds are exact: swe_rise_trans lands on
+ * them to better than 0.1 arcsec, measured.
+ *
+ * Rise and set are not a constant. The threshold is minus the sum of the
+ * body's semidiameter and the refraction at the horizon, the semidiameter
+ * moves with distance, and the refraction swe_rise_trans applies depends on
+ * the observer's altitude through an internal pressure model that the public
+ * refraction API does not expose. So RISE_SET is a sentinel: the threshold is
+ * calibrated from Swiss itself per site. See refraction() in makeTrack. */
+const RISE_SET = null;
+const ALT_CIVIL = -6.0;
+const ALT_NAUTICAL = -12.0;
+const ALT_ASTRO = -18.0;
+const GOLDEN_LOW = -4.0;
+const GOLDEN_HIGH = 6.0;
+
+/* The refraction swe_rise_trans uses at sea level, measured from the engine
+ * itself: 36.739 arcmin, constant to 0.002 arcmin across latitude, season and
+ * body. Only used when calibration cannot run, which is deep inside a polar
+ * day or night where the nearest rise or set is weeks away and the body is
+ * degrees clear of the horizon anyway. */
+const DEFAULT_HORIZON_REFRACTION = 36.739 / 60.0;
+
+const RISE = 'rise', SET = 'set', TRANSIT_UP = 'transit_up', TRANSIT_DOWN = 'transit_down';
+
+/* The full event ladder in chronological intent. This ordering is canonical:
+ * it is how events with no time are ordered in the output, and it breaks ties
+ * between two events that share an instant.
+ *   key, label, body, direction, mode, rsmi_or_alt, threshold_alt_deg          */
+const LADDER = [
+  ['astronomical_dawn',    'Astronomical dawn',  'sun',  RISE,         'rsmi', CALC_RISE | BIT_ASTRO,  ALT_ASTRO],
+  ['nautical_dawn',        'Nautical dawn',      'sun',  RISE,         'rsmi', CALC_RISE | BIT_NAUTIC, ALT_NAUTICAL],
+  ['civil_dawn',           'Civil dawn',         'sun',  RISE,         'rsmi', CALC_RISE | BIT_CIVIL,  ALT_CIVIL],
+  ['golden_hour_start_am', 'Golden hour begins', 'sun',  RISE,         'alt',  GOLDEN_LOW,             GOLDEN_LOW],
+  ['sunrise',              'Sunrise',            'sun',  RISE,         'rsmi', CALC_RISE,              RISE_SET],
+  ['golden_hour_end_am',   'Golden hour ends',   'sun',  RISE,         'alt',  GOLDEN_HIGH,            GOLDEN_HIGH],
+  ['solar_noon',           'Solar noon',         'sun',  TRANSIT_UP,   'rsmi', CALC_MTRANSIT,          null],
+  ['golden_hour_start_pm', 'Golden hour begins', 'sun',  SET,          'alt',  GOLDEN_HIGH,            GOLDEN_HIGH],
+  ['sunset',               'Sunset',             'sun',  SET,          'rsmi', CALC_SET,               RISE_SET],
+  ['golden_hour_end_pm',   'Golden hour ends',   'sun',  SET,          'alt',  GOLDEN_LOW,             GOLDEN_LOW],
+  ['civil_dusk',           'Civil dusk',         'sun',  SET,          'rsmi', CALC_SET | BIT_CIVIL,   ALT_CIVIL],
+  ['nautical_dusk',        'Nautical dusk',      'sun',  SET,          'rsmi', CALC_SET | BIT_NAUTIC,  ALT_NAUTICAL],
+  ['astronomical_dusk',    'Astronomical dusk',  'sun',  SET,          'rsmi', CALC_SET | BIT_ASTRO,   ALT_ASTRO],
+  ['solar_midnight',       'Solar midnight',     'sun',  TRANSIT_DOWN, 'rsmi', CALC_ITRANSIT,          null],
+  ['moonrise',             'Moonrise',           'moon', RISE,         'rsmi', CALC_RISE,              null],
+  ['lunar_noon',           'Lunar noon',         'moon', TRANSIT_UP,   'rsmi', CALC_MTRANSIT,          null],
+  ['moonset',              'Moonset',            'moon', SET,          'rsmi', CALC_SET,               null],
+  ['lunar_midnight',       'Lunar midnight',     'moon', TRANSIT_DOWN, 'rsmi', CALC_ITRANSIT,          null],
 ];
 
-const MOON_EVENTS = [
-  ['moonrise',        'Moonrise',        CALC_RISE],
-  ['lunar_noon',      'Lunar noon',      CALC_MTRANSIT],
-  ['moonset',         'Moonset',         CALC_SET],
-  ['lunar_midnight',  'Lunar midnight',  CALC_ITRANSIT],
-];
+const LADDER_INDEX = Object.create(null);
+LADDER.forEach((row, i) => { LADDER_INDEX[row[0]] = i; });
 
-// Golden hour is an altitude band, not a Swiss bit flag: the sun's centre
-// between -4 and +6 degrees geometric altitude.
-const BANDS = [
-  ['golden_hour_start_am', 'Golden hour begins', -4.0, true],
-  ['golden_hour_end_am',   'Golden hour ends',    6.0, true],
-  ['golden_hour_start_pm', 'Golden hour begins',  6.0, false],
-  ['golden_hour_end_pm',   'Golden hour ends',   -4.0, false],
-];
+const BODY_ID = { sun: SUN, moon: MOON };
+
+// One second in Julian days, and the nudge used to step past a solved event so
+// the next search does not re-find the same one.
+const SEC = 1.0 / 86400.0;
+const NUDGE = 2.0 * SEC;
+
+/* ------------------------------------------------------------ time plumbing */
+
+const MS_PER_DAY = 86400000;
+const UNIX_EPOCH_JD = 2440587.5;
+
+const msToJd = (ms) => ms / MS_PER_DAY + UNIX_EPOCH_JD;
+
+/** Python's round(): half-to-even, unlike Math.round's half-up. */
+function pyRound(x) {
+  const f = Math.floor(x), diff = x - f;
+  if (diff > 0.5) return f + 1;
+  if (diff < 0.5) return f;
+  return (f % 2 === 0) ? f : f + 1;
+}
+
+/**
+ * Julian Day UT -> epoch ms, rounded to the millisecond.
+ *
+ * Goes through swe_revjul rather than a straight epoch subtraction so the
+ * rounding happens on the SAME quantity solar.py rounds - the fractional hour
+ * within the civil day. The two paths differ in the last ulp, and that is
+ * enough to land on opposite sides of a half-millisecond boundary.
+ */
+function jdToMs(eng, jd) {
+  const M = eng.M;
+  // swe_revjul(double jd, int32 gregflag, int32 *jyear, int32 *jmon,
+  //            int32 *jday, double *jut) - six arguments, six types.
+  M.ccall('swe_revjul', null,
+    ['number', 'number', 'number', 'number', 'number', 'number'],
+    [jd, GREG_CAL, eng.revIPtr, eng.revIPtr + 4, eng.revIPtr + 8, eng.revDPtr]);
+  const i32 = M.HEAP32, base = eng.revIPtr >> 2;
+  const y = i32[base], mo = i32[base + 1], d = i32[base + 2];
+  const h = M.HEAPF64[eng.revDPtr >> 3];
+  let dayMs = Date.UTC(y, mo - 1, d);
+  if (y >= 0 && y < 100) {           // Date.UTC maps 0-99 onto 1900-1999
+    const t = new Date(dayMs);
+    t.setUTCFullYear(y);
+    dayMs = t.getTime();
+  }
+  return dayMs + pyRound(h * 3600 * 1000);
+}
+
+// Decimal rounding on the double's exact value, matching Python's round(v, n).
+const round2 = (v) => Number(v.toFixed(2));
+const round3 = (v) => Number(v.toFixed(3));
+
+const pad = (n, w) => String(n).padStart(w, '0');
+
+const formatters = new Map();
+function zoneFormatter(tz) {
+  let f = formatters.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    formatters.set(tz, f);
+  }
+  return f;
+}
+
+function zoneParts(tz, utcMs) {
+  const p = Object.create(null);
+  for (const part of zoneFormatter(tz).formatToParts(utcMs)) p[part.type] = part.value;
+  return p;
+}
+
+/** The local calendar date at an instant, as YYYY-MM-DD (sorts chronologically). */
+function localDateAt(tz, utcMs) {
+  const p = zoneParts(tz, utcMs);
+  return pad(Number(p.year), 4) + '-' + p.month + '-' + p.day;
+}
+
+/** UTC offset of an IANA zone at an instant, in ms. */
+function zoneOffsetMs(tz, utcMs) {
+  const p = zoneParts(tz, utcMs);
+  const hour = p.hour === '24' ? 0 : Number(p.hour);
+  const wallAsUtc = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day),
+    hour, Number(p.minute), Number(p.second));
+  // formatToParts truncates below the second; compare against a truncated
+  // instant or the offset absorbs the sub-second remainder.
+  return wallAsUtc - Math.floor(utcMs / 1000) * 1000;
+}
+
+/**
+ * First instant of a local calendar date, by bisection on UTC seconds.
+ *
+ * The predicate "local date here is at or past the target" is monotonic in
+ * every real zone, which is what makes this correct where naive midnight
+ * arithmetic is not: in a zone whose clocks jump AT midnight there is no local
+ * midnight to construct, and this still returns the day's true first instant.
+ */
+function firstInstantOf(tz, y, mo, d) {
+  const target = pad(y, 4) + '-' + pad(mo, 2) + '-' + pad(d, 2);
+  // Naive midnight is never more than 30 hours from the true first instant.
+  const lo = Date.UTC(y, mo - 1, d) - 2 * MS_PER_DAY;
+  let loS = Math.floor(lo / 1000);
+  let hiS = loS + 4 * 86400;
+  while (hiS - loS > 1) {
+    const mid = Math.floor((loS + hiS) / 2);
+    if (localDateAt(tz, mid * 1000) >= target) hiS = mid; else loS = mid;
+  }
+  return hiS * 1000;
+}
+
+/** Python datetime.isoformat() fractional-second rules, reproduced exactly. */
+function frac(ms) {
+  const rem = ((ms % 1000) + 1000) % 1000;
+  return rem === 0 ? '' : '.' + pad(rem, 3) + '000';
+}
+
+function ymdhms(ms) {
+  const t = new Date(ms);
+  return pad(t.getUTCFullYear(), 4) + '-' + pad(t.getUTCMonth() + 1, 2) + '-' +
+    pad(t.getUTCDate(), 2) + 'T' + pad(t.getUTCHours(), 2) + ':' +
+    pad(t.getUTCMinutes(), 2) + ':' + pad(t.getUTCSeconds(), 2);
+}
+
+const isoZ = (ms) => ymdhms(ms) + frac(ms) + 'Z';
+
+function isoLocal(ms, tz) {
+  const off = zoneOffsetMs(tz, ms);
+  const shifted = ms + off;
+  const abs = Math.abs(off) / 1000;
+  const oh = Math.floor(abs / 3600);
+  const om = Math.floor(abs / 60) % 60;
+  const os = Math.floor(abs) % 60;
+  return ymdhms(shifted) + frac(shifted) + (off < 0 ? '-' : '+') +
+    pad(oh, 2) + ':' + pad(om, 2) + (os ? ':' + pad(os, 2) : '');
+}
+
+/* ------------------------------------------------------------------- engine */
 
 let enginePromise = null;
 
+/**
+ * Load the Swiss Ephemeris WASM and inject OUR .se1 files.
+ *
+ * The vendored package wants a 12MB Emscripten .data preload we do not ship;
+ * getPreloadedPackage hands the loader an empty ArrayBuffer of the size it
+ * asked for, which satisfies it with no download. The real ephemeris then goes
+ * into MEMFS at /ephe and swe_set_ephe_path points the engine there. Same
+ * pattern proven in STARMAP's personal-sky-worker.js.
+ */
 function initEngine(base) {
   if (enginePromise) return enginePromise;
   enginePromise = (async () => {
     const factory = (await import(base + 'vendor/sweph/swisseph.js')).default;
     const M = await factory({
-      // Bypass the package's 12MB .data preload; we inject our own ephemeris.
       getPreloadedPackage: (_name, size) => new ArrayBuffer(size),
       locateFile: (f) => base + 'vendor/sweph/' + f,
     });
-    M.FS.mkdir('/ephe');
-    for (const f of ['seas_18.se1', 'semo_18.se1', 'sepl_18.se1']) {
-      const buf = await (await fetch(base + 'data/ephe/' + f)).arrayBuffer();
-      M.FS.writeFile('/ephe/' + f, new Uint8Array(buf));
+    try { M.FS.mkdir('/ephe'); } catch (_e) { /* already there */ }
+    for (const f of EPHE_FILES) {
+      const res = await fetch(base + 'data/ephe/' + f);
+      if (!res.ok) throw new Error('ephemeris fetch failed: ' + f + ' (' + res.status + ')');
+      M.FS.writeFile('/ephe/' + f, new Uint8Array(await res.arrayBuffer()));
     }
     M.ccall('swe_set_ephe_path', null, ['string'], ['/ephe']);
 
-    // Allocate once. Emscripten heap views are re-read on every access below
-    // because a growing heap detaches the old typed-array view.
-    const geoPtr  = M._malloc(3 * 8);
-    const tretPtr = M._malloc(10 * 8);
-    const attrPtr = M._malloc(20 * 8);
-    const serrPtr = M._malloc(256);
-    return { M, geoPtr, tretPtr, attrPtr, serrPtr };
+    // Allocated once for the life of the worker, never freed per call.
+    //   geo  3 doubles in  (lon east-positive, lat, altitude metres)
+    //   tret 10 doubles out (Swiss writes the event time into tret[0])
+    //   attr 20 doubles out (swe_pheno_ut)
+    //   xx   6 doubles out (swe_calc_ut)
+    //   xin  3 doubles in  / xaz 3 doubles out (swe_azalt)
+    //   serr 256 chars out
+    const eng = {
+      M,
+      geoPtr:  M._malloc(3 * 8),
+      tretPtr: M._malloc(10 * 8),
+      attrPtr: M._malloc(20 * 8),
+      xxPtr:   M._malloc(6 * 8),
+      xinPtr:  M._malloc(3 * 8),
+      xazPtr:  M._malloc(3 * 8),
+      revIPtr: M._malloc(16),
+      revDPtr: M._malloc(8),
+      serrPtr: M._malloc(256),
+    };
+    M.ccall('swe_version', 'number', ['number'], [eng.serrPtr]);
+    eng.version = M.UTF8ToString(eng.serrPtr) || '2.10.03';
+    return eng;
   })();
   enginePromise = enginePromise.catch((err) => { enginePromise = null; throw err; });
   return enginePromise;
 }
 
-/* ---- time helpers ---- */
+// swe_rise_trans(double tjd_ut, int32 ipl, char *starname, int32 epheflag,
+//                int32 rsmi, double *geopos, double atpress, double attemp,
+//                double *tret, char *serr)
+const SIG_RT = ['number', 'number', 'number', 'number', 'number',
+  'number', 'number', 'number', 'number', 'number'];
+// swe_rise_trans_true_hor(..., double horhgt, double *tret, char *serr)
+const SIG_RT_HOR = ['number', 'number', 'number', 'number', 'number',
+  'number', 'number', 'number', 'number', 'number', 'number'];
+// swe_azalt(double tjd_ut, int32 calc_flag, double *geopos, double atpress,
+//           double attemp, double *xin, double *xaz)
+const SIG_AZALT = ['number', 'number', 'number', 'number', 'number', 'number', 'number'];
 
-const UNIX_EPOCH_JD = 2440587.5;
-const msToJd = (ms) => ms / 86400000 + UNIX_EPOCH_JD;
-const jdToMs = (jd) => (jd - UNIX_EPOCH_JD) * 86400000;
-
-/** Offset of an IANA zone from UTC, in ms, at a given instant. */
-function tzOffsetMs(instantMs, tz) {
-  const d = new Date(instantMs);
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz, hour12: false,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  }).formatToParts(d).reduce((a, p) => (a[p.type] = p.value, a), {});
-  // Interpret the wall-clock reading as if it were UTC, then difference.
-  const asUTC = Date.UTC(+parts.year, +parts.month - 1, +parts.day,
-    +parts.hour % 24, +parts.minute, +parts.second);
-  return asUTC - (Math.floor(instantMs / 1000) * 1000);
-}
-
-/** UTC ms for local midnight of `dateStr` in `tz`. Handles DST by iterating. */
-function localMidnightMs(dateStr, tz) {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  let guess = Date.UTC(y, m - 1, d, 0, 0, 0);
-  for (let i = 0; i < 3; i++) {
-    const off = tzOffsetMs(guess, tz);
-    const corrected = Date.UTC(y, m - 1, d, 0, 0, 0) - off;
-    if (Math.abs(corrected - guess) < 1000) { guess = corrected; break; }
-    guess = corrected;
-  }
-  return guess;
-}
-
-function isoZ(ms) {
-  return new Date(Math.round(ms)).toISOString().replace(/\.(\d{3})\d*Z$/, '.$1Z');
-}
-
-/** Local ISO string (with offset) for an instant in a zone. */
-function isoLocal(ms, tz) {
-  const off = tzOffsetMs(ms, tz);
-  const shifted = new Date(ms + off);
-  const sign = off >= 0 ? '+' : '-';
-  const a = Math.abs(off) / 60000;
-  const hh = String(Math.floor(a / 60)).padStart(2, '0');
-  const mm = String(Math.round(a % 60)).padStart(2, '0');
-  return shifted.toISOString().slice(0, 23) + sign + hh + ':' + mm;
-}
-
-/* ---- the Swiss calls ---- */
-
+/** Heap views are re-read on every access: a growing heap detaches the old ones. */
 function setGeo(eng, lon, lat, alt) {
-  const { M, geoPtr } = eng;
-  const h = M.HEAPF64;            // re-read: heap growth detaches old views
-  h[geoPtr / 8] = lon;
-  h[geoPtr / 8 + 1] = lat;
-  h[geoPtr / 8 + 2] = alt;
+  const h = eng.M.HEAPF64, i = eng.geoPtr >> 3;
+  h[i] = lon; h[i + 1] = lat; h[i + 2] = alt;
+}
+
+/** Null-terminate serr so a stale message from an earlier call cannot leak out. */
+function clearErr(eng) {
+  eng.M.HEAP32[eng.serrPtr >> 2] = 0;
 }
 
 /**
- * swe_rise_trans(double tjd_ut, int32 ipl, char *starname, int32 epheflag,
- *                int32 rsmi, double *geopos, double atpress, double attemp,
- *                double *tret, char *serr)
+ * One Swiss rise/set/transit solve. Returns { jd, ret, err }.
+ * Mirrors solar.py's _solve_one, including its error contract: a hard failure
+ * (Swiss ERR) becomes an err string, while "no event" (-2) is a quiet null
+ * that the altitude track is left to explain.
  */
-function riseTrans(eng, jd, body, rsmi) {
-  const { M, geoPtr, tretPtr, serrPtr } = eng;
-  const ret = M.ccall('swe_rise_trans', 'number',
-    ['number', 'number', 'number', 'number', 'number',
-     'number', 'number', 'number', 'number', 'number'],
-    [jd, body, 0, FLG_SWIEPH, rsmi, geoPtr, 0.0, 0.0, tretPtr, serrPtr]);
-  if (ret === -2) return { status: 'circumpolar', jd: null };
-  if (ret < 0) return { status: 'error: ' + M.UTF8ToString(serrPtr), jd: null };
-  return { status: 'ok', jd: M.HEAPF64[tretPtr / 8] };
+function solveOne(eng, jdStart, ipl, mode, rsmiOrAlt, direction) {
+  clearErr(eng);
+  let ret;
+  if (mode === 'rsmi') {
+    ret = eng.M.ccall('swe_rise_trans', 'number', SIG_RT,
+      [jdStart, ipl, 0 /* starname NULL */, FLG_SWIEPH, rsmiOrAlt,
+        eng.geoPtr, 0.0, 0.0, eng.tretPtr, eng.serrPtr]);
+  } else {
+    const rsmi = (direction === RISE ? CALC_RISE : CALC_SET) | BIT_DISC_CENTER | BIT_NO_REFRACTION;
+    ret = eng.M.ccall('swe_rise_trans_true_hor', 'number', SIG_RT_HOR,
+      [jdStart, ipl, 0, FLG_SWIEPH, rsmi,
+        eng.geoPtr, 0.0, 0.0, Number(rsmiOrAlt), eng.tretPtr, eng.serrPtr]);
+  }
+  if (ret === -1) {
+    return { jd: null, ret: null, err: eng.M.UTF8ToString(eng.serrPtr) || 'swe_rise_trans failed' };
+  }
+  if (ret !== 0) return { jd: null, ret, err: null };
+  return { jd: eng.M.HEAPF64[eng.tretPtr >> 3], ret: 0, err: null };
 }
 
-/**
- * swe_rise_trans_true_hor(..., double horhgt, double *tret, char *serr)
- * One extra double before tret.
- */
-function riseTransAlt(eng, jd, body, rising, altDeg) {
-  const { M, geoPtr, tretPtr, serrPtr } = eng;
-  const rsmi = (rising ? CALC_RISE : CALC_SET) | BIT_DISC_CENTER | BIT_NO_REFRACTION;
-  const ret = M.ccall('swe_rise_trans_true_hor', 'number',
-    ['number', 'number', 'number', 'number', 'number',
-     'number', 'number', 'number', 'number', 'number', 'number'],
-    [jd, body, 0, FLG_SWIEPH, rsmi, geoPtr, 0.0, 0.0, altDeg, tretPtr, serrPtr]);
-  if (ret === -2) return { status: 'circumpolar', jd: null };
-  if (ret < 0) return { status: 'error: ' + M.UTF8ToString(serrPtr), jd: null };
-  return { status: 'ok', jd: M.HEAPF64[tretPtr / 8] };
-}
-
-/** swe_pheno_ut(double tjd_ut, int32 ipl, int32 iflag, double *attr, char *serr) */
-function phenoUt(eng, jd, body) {
-  const { M, attrPtr, serrPtr } = eng;
-  const ret = M.ccall('swe_pheno_ut', 'number',
+/** Topocentric moon phenomena. attr[0] phase angle, [1] phase, [3] diameter deg. */
+function phenoTopo(eng, jd, ipl, lon, lat, altM) {
+  eng.M.ccall('swe_set_topo', null, ['number', 'number', 'number'], [lon, lat, altM]);
+  clearErr(eng);
+  const ret = eng.M.ccall('swe_pheno_ut', 'number',
     ['number', 'number', 'number', 'number', 'number'],
-    [jd, body, FLG_SWIEPH, attrPtr, serrPtr]);
-  if (ret < 0) return null;
-  const h = M.HEAPF64, i = attrPtr / 8;
-  return { phaseAngle: h[i], illum: h[i + 1], diamArcsec: h[i + 3] * 3600 };
+    [jd, ipl, FLG_SWIEPH | FLG_TOPOCTR, eng.attrPtr, eng.serrPtr]);
+  if (ret < 0) throw new Error(eng.M.UTF8ToString(eng.serrPtr) || 'swe_pheno_ut failed');
+  const h = eng.M.HEAPF64, i = eng.attrPtr >> 3;
+  return { phaseAngle: h[i], phase: h[i + 1], diamDeg: h[i + 3] };
 }
 
-/* ---- the day solve ---- */
+/* ------------------------------------- the altitude track, the arbiter ----- */
 
-function solveDay(eng, coords, dateStr, tz, wantMoon) {
-  setGeo(eng, coords.lon, coords.lat, coords.alt || 0);
+/**
+ * Geometric topocentric altitude of one body, sampled over one local day.
+ *
+ * This is what decides always_above / always_below, and what backstops the
+ * Swiss solver: if Swiss reports no event but the altitude track crosses the
+ * threshold, the crossing is found here by bisection rather than lost.
+ */
+function makeTrack(eng, body, geo, jd0, jd1) {
+  const STEP_MIN = 2.0;
+  const ipl = BODY_ID[body];
+  const [lon, lat, altM] = geo;
 
-  const startMs = localMidnightMs(dateStr, tz);
-  const endMs = startMs + 24 * 3600 * 1000 + tzOffsetMs(startMs, tz) - tzOffsetMs(startMs + 86400000, tz);
-  const jd0 = msToJd(startMs);
-
-  const events = [];
-  const push = (key, label, body, res) => {
-    if (res.jd === null) {
-      events.push({ key, label, body, utc: null, local: null, status: res.status });
-      return;
-    }
-    const ms = jdToMs(res.jd);
-    if (ms < startMs || ms >= endMs) return;   // not in this local day
-    events.push({
-      key, label, body,
-      utc: isoZ(ms), local: isoLocal(ms, tz), status: 'ok',
-    });
-  };
-
-  for (const [key, label, rsmi] of SUN_EVENTS) {
-    // Search from just before local midnight so an event at 00:0x is not missed,
-    // then window-filter. A second probe a day back catches transits that the
-    // first call resolves past the window (the high-latitude case).
-    let r = riseTrans(eng, jd0 - 0.05, SUN, rsmi);
-    if (r.jd !== null && jdToMs(r.jd) >= endMs) {
-      const back = riseTrans(eng, jd0 - 1.05, SUN, rsmi);
-      if (back.jd !== null && jdToMs(back.jd) >= startMs && jdToMs(back.jd) < endMs) r = back;
-    }
-    push(key, label, 'sun', r);
+  /** Geometric (unrefracted) topocentric altitude of the body's centre. */
+  function altitude(jd) {
+    const M = eng.M;
+    M.ccall('swe_set_topo', null, ['number', 'number', 'number'], [lon, lat, altM]);
+    clearErr(eng);
+    const ret = M.ccall('swe_calc_ut', 'number',
+      ['number', 'number', 'number', 'number', 'number'],
+      [jd, ipl, FLG_SWIEPH | FLG_EQUATORIAL | FLG_TOPOCTR, eng.xxPtr, eng.serrPtr]);
+    if (ret < 0) throw new Error(M.UTF8ToString(eng.serrPtr) || 'swe_calc_ut failed');
+    const h = M.HEAPF64, xi = eng.xinPtr >> 3, xx = eng.xxPtr >> 3;
+    h[xi] = h[xx]; h[xi + 1] = h[xx + 1]; h[xi + 2] = h[xx + 2];
+    M.ccall('swe_azalt', null, SIG_AZALT,
+      [jd, EQU2HOR, eng.geoPtr, 0.0, 0.0, eng.xinPtr, eng.xazPtr]);
+    return M.HEAPF64[(eng.xazPtr >> 3) + 1];   // xaz[1] = true altitude
   }
 
-  for (const [key, label, altDeg, rising] of BANDS) {
-    push(key, label, 'sun', riseTransAlt(eng, jd0 - 0.05, SUN, rising, altDeg));
+  /** Topocentric apparent semidiameter of the body, in degrees. */
+  function semidiameter(jd) {
+    return phenoTopo(eng, jd, ipl, lon, lat, altM).diamDeg / 2.0;
   }
 
-  if (wantMoon) {
-    for (const [key, label, rsmi] of MOON_EVENTS) {
-      let r = riseTrans(eng, jd0 - 0.05, MOON, rsmi);
-      if (r.jd !== null && jdToMs(r.jd) >= endMs) {
-        const back = riseTrans(eng, jd0 - 1.05, MOON, rsmi);
-        if (back.jd !== null && jdToMs(back.jd) >= startMs && jdToMs(back.jd) < endMs) r = back;
+  let refr = null;
+
+  /**
+   * The refraction component of Swiss's OWN rise/set threshold, here.
+   *
+   * Calibrated rather than assumed. swe_rise_trans places rise and set at a
+   * centre altitude of minus (refraction plus semidiameter); the semidiameter
+   * is knowable, but the refraction depends on the observer's altitude through
+   * an internal pressure model that the public refraction API does not
+   * reproduce. So ask Swiss for a rise or set it CAN solve near this day,
+   * measure the geometric centre altitude it chose, and subtract the
+   * semidiameter. What is left is the refraction Swiss is using at this site.
+   *
+   * This is what keeps the fallback solver definitionally identical to the
+   * primary one. Without it the two disagree by 10 to 60 seconds, and a
+   * rescued sunset sits visibly out of line with the days either side of it.
+   */
+  function refraction() {
+    if (refr !== null) return refr;
+    const mid = 0.5 * (jd0 + jd1) - 0.5;
+    const offsets = [0.0];
+    for (let k = 1; k < 25; k++) { offsets.push(-k); offsets.push(k); }
+    for (const offset of offsets) {
+      for (const flag of [CALC_RISE, CALC_SET]) {
+        setGeo(eng, lon, lat, altM);
+        const r = solveOne(eng, mid + offset, ipl, 'rsmi', flag, null);
+        if (r.err !== null || r.jd === null) continue;
+        refr = -altitude(r.jd) - semidiameter(r.jd);
+        return refr;
       }
-      push(key, label, 'moon', r);
     }
+    // Deep polar day or night: no rise or set within 24 days to calibrate
+    // against. The body is degrees clear of the horizon, so the sea-level
+    // constant is far more precision than the classification needs.
+    refr = DEFAULT_HORIZON_REFRACTION;
+    return refr;
   }
 
-  events.sort((a, b) => {
-    if (a.utc === null && b.utc === null) return 0;
-    if (a.utc === null) return 1;
-    if (b.utc === null) return -1;
-    return a.utc < b.utc ? -1 : a.utc > b.utc ? 1 : 0;
-  });
-
-  const byKey = Object.fromEntries(events.map((e) => [e.key, e]));
-  let dayLen = null;
-  if (byKey.sunrise && byKey.sunrise.utc && byKey.sunset && byKey.sunset.utc) {
-    dayLen = Math.round((Date.parse(byKey.sunset.utc) - Date.parse(byKey.sunrise.utc)) / 1000);
+  /** Threshold altitude at jd. Fixed for twilight, live for rise/set. */
+  function threshold(jd, thr) {
+    if (thr !== null) return thr;
+    return -(refraction() + semidiameter(jd));
   }
 
-  const ph = phenoUt(eng, msToJd(startMs + 12 * 3600 * 1000), MOON);
+  const f = (jd, thr) => altitude(jd) - threshold(jd, thr);
+
+  const n = Math.max(2, pyRound((jd1 - jd0) * 1440.0 / STEP_MIN) + 1);
+  const grid = new Array(n);
+  for (let i = 0; i < n; i++) grid[i] = jd0 + (jd1 - jd0) * i / (n - 1);
+  const alt = grid.map(altitude);
+
+  const gridCache = new Map();
+  function gridF(thr) {
+    if (!gridCache.has(thr)) {
+      gridCache.set(thr, grid.map((j, i) => alt[i] - threshold(j, thr)));
+    }
+    return gridCache.get(thr);
+  }
+
+  function bisect(lo, hi, thr) {
+    let fLo = f(lo, thr);
+    while ((hi - lo) > 0.05 * SEC) {
+      const mid = 0.5 * (lo + hi);
+      const fMid = f(mid, thr);
+      if ((fMid < 0.0) === (fLo < 0.0)) { lo = mid; fLo = fMid; } else { hi = mid; }
+    }
+    return 0.5 * (lo + hi);
+  }
 
   return {
-    date: dateStr,
+    /** (min, max) of altitude-minus-threshold across the day. */
+    extrema(thr) {
+      const vals = gridF(thr);
+      let lo = Infinity, hi = -Infinity;
+      for (const v of vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
+      return [lo, hi];
+    },
+    /** Every threshold crossing in the window, in the requested direction. */
+    crossings(thr, direction) {
+      const wantUp = direction === RISE;
+      const vals = gridF(thr);
+      const found = [];
+      for (let i = 1; i < grid.length; i++) {
+        const prevV = vals[i - 1], v = vals[i];
+        const crossedUp = prevV < 0.0 && 0.0 <= v;
+        const crossedDown = prevV > 0.0 && 0.0 >= v;
+        if ((crossedUp && wantUp) || (crossedDown && !wantUp)) {
+          found.push(bisect(grid[i - 1], grid[i], thr));
+        }
+      }
+      return found;
+    },
+  };
+}
+
+/* ---------------------------------------------------------------- the solve */
+
+/**
+ * All occurrences of one event inside [jd0, jd1). Returns [jds, status].
+ *
+ * Walks the whole window rather than asking Swiss for "the next event after
+ * midnight" and keeping it if it happens to land inside the day. That older
+ * question lost events three ways: a second occurrence in a 25-hour fall-back
+ * day was never looked for, an event outside the window vanished instead of
+ * being reported absent, and a -2 return was called "circumpolar" even when the
+ * Sun plainly rose and only a twilight threshold went unreached.
+ */
+function solveWindow(eng, spec, jd0, jd1, trackFor) {
+  const [, , body, direction, mode, rsmiOrAlt, thr] = spec;
+  const ipl = BODY_ID[body];
+
+  const jds = [];
+  let cursor = jd0 - SEC;   // a hair early, so an event exactly at the boundary
+  let err = null;           // instant is not stepped over
+  for (let i = 0; i < 8; i++) {   // a 25-hour day holds at most two of anything
+    const r = solveOne(eng, cursor, ipl, mode, rsmiOrAlt, direction);
+    err = r.err;
+    if (err !== null || r.jd === null) break;
+    if (r.jd >= jd1) break;
+    if (r.jd >= jd0) jds.push(r.jd);
+    cursor = r.jd + NUDGE;
+    if (cursor >= jd1) break;
+  }
+
+  if (err !== null) return [[], 'error: ' + err];
+  if (jds.length) return [jds, 'ok'];
+
+  // Nothing from Swiss. Measure the day before saying anything about it.
+  if (direction === TRANSIT_UP || direction === TRANSIT_DOWN) {
+    // A transit always exists; the only honest empty answer is that none of
+    // them landed in this local day.
+    return [[], 'none_today'];
+  }
+
+  const track = trackFor(body);
+  const fallback = track.crossings(thr, direction);
+  if (fallback.length) return [fallback, 'ok'];   // the sky outranks the solver
+
+  const [lo, hi] = track.extrema(thr);
+  if (lo > 0.0) return [[], 'always_above'];
+  if (hi < 0.0) return [[], 'always_below'];
+  // The threshold is crossed inside the window, but not in this event's
+  // direction: the matching crossing sits on the other side of midnight.
+  return [[], 'none_today'];
+}
+
+/**
+ * Seconds from the day's sunrise to the sunset that follows it.
+ *
+ * The pair need not sit inside the same local day: at Tromso in mid-May the Sun
+ * rises at 01:29 and does not set until 00:06 the next morning, and 22h37m is
+ * the honest answer for how long that day was. Polar day returns the full
+ * length of the local day, polar night returns 0. Both are measured facts.
+ */
+function dayLength(eng, times, statuses, jd0, jd1) {
+  const windowS = pyRound((jd1 - jd0) * 86400.0);
+  if (statuses.sunrise === 'always_above') return windowS;
+  if (statuses.sunrise === 'always_below') return 0;
+
+  const rises = times.sunrise || [], sets = times.sunset || [];
+  if (rises.length) {
+    const sr = rises[0];
+    const r = solveOne(eng, sr + NUDGE, SUN, 'rsmi', CALC_SET, SET);
+    if (r.jd !== null) return pyRound((r.jd - sr) * 86400.0);
+    return null;
+  }
+  if (sets.length) {
+    const ss = sets[0];
+    // Walk forward from 36 hours back and keep the last sunrise before it.
+    let cursor = ss - 1.5, best = null;
+    for (let i = 0; i < 4; i++) {
+      const r = solveOne(eng, cursor, SUN, 'rsmi', CALC_RISE, RISE);
+      if (r.jd === null || r.jd >= ss) break;
+      best = r.jd;
+      cursor = r.jd + NUDGE;
+    }
+    if (best !== null) return pyRound((ss - best) * 86400.0);
+  }
+  return null;
+}
+
+function parseDate(s) {
+  const m = String(s == null ? '' : s).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) throw new Error('date must be YYYY-MM-DD, got: ' + s);
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function todayIn(tz) {
+  const p = zoneParts(tz, Date.now());
+  return pad(Number(p.year), 4) + '-' + p.month + '-' + p.day;
+}
+
+/** Every solar and lunar event for one LOCAL calendar day at one location. */
+function dayEvents(eng, lat, lon, altM, dateStr, tz, wantMoon) {
+  const [y, mo, d] = parseDate(dateStr);
+  const geo = [lon, lat, altM];
+  setGeo(eng, lon, lat, altM);
+
+  const startMs = firstInstantOf(tz, y, mo, d);
+  const nx = new Date(Date.UTC(y, mo - 1, d + 1));
+  const endMs = firstInstantOf(tz, nx.getUTCFullYear(), nx.getUTCMonth() + 1, nx.getUTCDate());
+  const jd0 = msToJd(startMs), jd1 = msToJd(endMs);
+
+  const tracks = Object.create(null);
+  const trackFor = (body) => {
+    if (!tracks[body]) tracks[body] = makeTrack(eng, body, geo, jd0, jd1);
+    return tracks[body];
+  };
+
+  const events = [];
+  const statuses = Object.create(null);
+  const times = Object.create(null);
+
+  for (const spec of LADDER) {
+    const [key, label, body] = spec;
+    if (!wantMoon && body === 'moon') continue;
+    // Swiss's rise/set internals set the topocentric observer; re-assert ours
+    // in case an altitude track moved it.
+    setGeo(eng, lon, lat, altM);
+    const [jds, status] = solveWindow(eng, spec, jd0, jd1, trackFor);
+    statuses[key] = status;
+    times[key] = jds;
+    if (!jds.length) {
+      events.push({ key, label, body, utc: null, local: null, status });
+      continue;
+    }
+    for (const jd of jds) {
+      const ms = jdToMs(eng, jd);
+      events.push({ key, label, body, utc: isoZ(ms), local: isoLocal(ms, tz), status });
+    }
+  }
+
+  // solar.py's sort key: nulls last, then the raw UTC string, then ladder order.
+  events.sort((a, b) => {
+    const an = a.utc === null, bn = b.utc === null;
+    if (an !== bn) return an ? 1 : -1;
+    const au = a.utc || '', bu = b.utc || '';
+    if (au < bu) return -1;
+    if (au > bu) return 1;
+    return LADDER_INDEX[a.key] - LADDER_INDEX[b.key];
+  });
+
+  setGeo(eng, lon, lat, altM);
+  const dayLen = dayLength(eng, times, statuses, jd0, jd1);
+
+  // Sampled at the midpoint of the local day - a stable daily instant that
+  // survives DST shifts - and topocentric, because the contract carries an
+  // observer and apparent_diameter_arcsec should mean what they would measure.
+  const ph = phenoTopo(eng, 0.5 * (jd0 + jd1), MOON, lon, lat, altM);
+
+  return {
+    date: pad(y, 4) + '-' + pad(mo, 2) + '-' + pad(d, 2),
     tz,
-    observer: { lat: coords.lat, lon: coords.lon, alt_m: coords.alt || 0 },
-    engine: 'Swiss Ephemeris 2.10.03 (JPL DE441), swe_rise_trans, topocentric, on-device',
+    observer: { lat, lon, alt_m: altM },
+    engine: 'Swiss Ephemeris ' + eng.version + ' (JPL DE441), swe_rise_trans, topocentric',
     day_length_s: dayLen,
-    moon: ph ? {
-      illumination_pct: Math.round(ph.illum * 10000) / 100,
-      phase_angle_deg: Math.round(ph.phaseAngle * 1000) / 1000,
-      apparent_diameter_arcsec: Math.round(ph.diamArcsec * 100) / 100,
-    } : null,
+    moon: {
+      illumination_pct: round2(ph.phase * 100),
+      phase_angle_deg: round3(ph.phaseAngle),
+      apparent_diameter_arcsec: round2(ph.diamDeg * 3600),
+    },
     events,
   };
 }
 
+/* ------------------------------------------------------------------ message */
+
+const DEFAULT_BASE = new URL('./', import.meta.url).href;
+
 self.onmessage = async (ev) => {
   const t0 = Date.now();
-  const { base, coords, date, tz, moon } = ev.data || {};
   try {
-    const eng = await initEngine(base || '/');
-    const result = solveDay(eng, coords, date, tz, moon !== false);
+    const msg = ev.data || {};
+    const coords = msg.coords || {};
+    const lat = Number(coords.lat), lon = Number(coords.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      throw new Error('coords.lat and coords.lon are required numbers');
+    }
+    if (!msg.tz) throw new Error('tz is required (an IANA zone name)');
+    const eng = await initEngine(msg.base || DEFAULT_BASE);
+    const result = dayEvents(eng, lat, lon, Number(coords.alt) || 0,
+      msg.date || todayIn(msg.tz), msg.tz, msg.moon !== false);
     self.postMessage({ ok: true, result, ms: Date.now() - t0 });
   } catch (e) {
     self.postMessage({ ok: false, error: String((e && e.message) || e) });
