@@ -617,8 +617,15 @@ a{color:inherit}
   font-family:var(--mono);font-size:12px;padding:10px 16px;text-decoration:none}
 .skip:focus{left:8px;top:8px}
 
-/* ---- THE BEAM FIELD ---- */
-#beams{position:fixed;inset:0;width:100vw;height:100vh;z-index:-1;pointer-events:none;opacity:.92}
+/* ---- THE BEAM FIELD ----
+   The field sits at z-index 0 and the content is lifted to 1, NOT the other way
+   round. A fixed, full-viewport layer at z-index -1 paints behind the root
+   background, and Chrome then fails to reliably repaint content stacked above it
+   while its animations run: the event ladder rendered one row and left the rest
+   of the page black. Verified live 2026-08-10. Keep the content lifted. */
+#beams{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none;opacity:.92}
+html{background:var(--bg)}
+header,main,footer,.controls{position:relative;z-index:1}
 #beams .sm-fan{transform-box:view-box;transform-origin:508px -168px;
   animation:sm-sway 124s ease-in-out infinite alternate}
 #beams .sm-ray{opacity:var(--o);
