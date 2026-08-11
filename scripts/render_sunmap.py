@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 PUDDY Inc. <legal@puddystudios.com>
-"""SUNMAP page generator - a structural fork of STARMAP.
+"""SUPERSEDED - do not run. The SUNMAP generator is scripts/render.py.
+
+This file is kept only as history. It is the last place in the tree that still
+carries the invented sun-yellow the PUDDY canon rejects, and its own Usage block
+below still calls itself the prod build - so running it would overwrite the page
+with off-canon colour. The guard immediately after this docstring makes that
+impossible. Recommend deleting the file outright; nothing imports it.
+
+--- original header follows ---
+
+SUNMAP page generator - a structural fork of STARMAP.
 
 STARMAP maps the year. SUNMAP maps the day. They are the same product family,
 so they are the same page: same chrome, same crest, same next-event card, same
@@ -20,11 +30,19 @@ Usage:
   python3 render_sunmap.py                                        # prod build
   python3 render_sunmap.py --site https://sunmap.puddy.dev/       # demo build
 """
+import sys
+
+sys.exit(
+    'render_sunmap.py is SUPERSEDED and will not run.\n'
+    'It emits the pre-canon palette, including the invented sun-yellow.\n'
+    'The SUNMAP generator is scripts/render.py - use:\n'
+    '  python3 scripts/render.py\n'
+)
+
 import argparse
 import json
 import math
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
