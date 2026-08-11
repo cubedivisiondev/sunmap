@@ -26,6 +26,15 @@ Site level:
   well formed, every <loc> on the prod host, resolving to a real page, with a
   valid non-future lastmod, and every indexable page present in the sitemap.
 
+AGPL surface (a ship gate, not an SEO nicety):
+  SUNMAP serves a Swiss Ephemeris WebAssembly build to every visitor, so it
+  conveys object code under GPL-3.0 / AGPL-3.0 and owes the Corresponding
+  Source from the same place. This asserts source.html exists and links the
+  archive, the archive exists, is a readable gzip tar over the size floor, and
+  contains everything the page claims - and, the check that matters, that the
+  sunmap-worker.js inside it is byte-identical to the one being served. A stale
+  archive is not Corresponding Source.
+
 House style: ASCII hyphens only, text sigils only (no image emojis).
 """
 
@@ -33,11 +42,14 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
+import io
 import json
 import os
 import re
 import struct
 import sys
+import tarfile
 import urllib.error
 import urllib.request
 import zlib
@@ -84,6 +96,49 @@ COLOR_RE = re.compile(r"^(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\)|[a-zA-
 # Dev surfaces sit behind a shared password gate; a 401/403 means "not audited",
 # not "broken", and must not be reported as a content defect.
 GATED = (401, 403)
+
+# --- AGPL surface -------------------------------------------------------------
+# SUNMAP serves a WebAssembly build of the Swiss Ephemeris to every visitor's
+# browser. That is conveying object code, and GPL-3.0 section 6(d) - the clause
+# that governs conveyance from a network server - wants the Corresponding Source
+# reachable "in the same way through the same place" as the binary. An email
+# address does not satisfy it. So these are not SEO checks that happen to live
+# here; they are the ship gate. A SUNMAP that serves the engine without the
+# archive is not a page with a broken link, it is a license violation.
+#
+# The check that actually earns its place is CORRESPONDS: the sunmap-worker.js
+# INSIDE the archive must be byte-identical to the one the site serves. Every
+# other file can be present and correct while the archive quietly describes a
+# worker that shipped six weeks ago.
+ENGINE_BINARY = "/vendor/sweph/swisseph.wasm"
+SOURCE_PAGE = "/source.html"
+SOURCE_ARCHIVE = "/source/corresponding-source.tar.gz"
+SOURCE_README = "/source/README.md"
+ARCHIVE_ROOT = "corresponding-source/"
+LICENSE_TEXTS = {
+    "/source/AGPL-3.0.txt": "GNU AFFERO GENERAL PUBLIC LICENSE",
+    "/source/GPL-3.0.txt": "GNU GENERAL PUBLIC LICENSE",
+}
+# Not a guess at the right size: the archive has to carry a 2.1 MB C library, so
+# anything under a megabyte is a truncated upload or an LFS pointer, not source.
+ARCHIVE_MIN_BYTES = 1_000_000
+LICENSE_TEXT_MIN_BYTES = 20_000        # the real GNU texts are ~34 KB
+README_MIN_BYTES = 1_000
+# Paths the archive must contain, relative to ARCHIVE_ROOT. A directory entry is
+# matched by prefix, a file by exact name.
+ARCHIVE_REQUIRED = (
+    "README.md",
+    "AGPL-3.0.txt",
+    "GPL-3.0.txt",
+    "sunmap-worker.js",
+    "swisseph-2.10.03/",
+    "swisseph-wasm-0.0.5-npm/wasm/swisseph.wasm",
+    "swisseph-wasm-0.0.5-npm/wasm/swisseph.js",
+    "swisseph-wasm-main/compile.sh",
+)
+# Served files that link the engine. Each must be in the archive, byte-identical.
+CORRESPONDS = ("sunmap-worker.js",)
+OFFER_CONTACT = "legal@puddystudios.com"
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 SIGIL = {PASS: "✓", WARN: "⚠", FAIL: "✗"}  # check / warning / cross
@@ -865,6 +920,140 @@ def audit_site(rep: Report, src: Source, env: str, pages: list[str],
                      f"{want} exists but is not in sitemap.xml (secondary page)")
 
 
+# --------------------------------------------------------------- agpl surface --
+def audit_agpl(rep: Report, src: Source) -> None:
+    """Assert the corresponding-source offer exists, resolves, and corresponds.
+
+    Runs in both environments. The obligation attaches to serving the binary, so
+    it applies on the dev host exactly as it does on prod - the only difference
+    is that a gated dev surface cannot be read, which is reported as unaudited
+    rather than as compliance."""
+    sec = "AGPL"
+
+    st, engine, note = src.get(ENGINE_BINARY)
+    if st in GATED:
+        rep.warn(sec, "engine served", f"HTTP {st} - behind the auth gate, AGPL surface not audited")
+        return
+    rep.check(sec, st == 200, "engine served",
+              f"{len(engine):,} bytes at {ENGINE_BINARY}",
+              f"{ENGINE_BINARY} did not resolve (HTTP/FS {st}, {note}) - SUNMAP cannot compute "
+              "anything without it, and if it moved the source offer now points at nothing")
+
+    # --- the offer page -----------------------------------------------------
+    st, blob, note = src.get(SOURCE_PAGE)
+    page = blob.decode("utf-8", "replace") if st == 200 else ""
+    if not rep.check(sec, st == 200, "source.html",
+                     f"present, {len(blob):,} bytes",
+                     f"{SOURCE_PAGE} is MISSING (HTTP/FS {st}, {note}) - the binary is conveyed "
+                     "with no corresponding-source offer"):
+        return
+    rep.check(sec, SOURCE_ARCHIVE.lstrip("/") in page, "source.html links archive",
+              "links the corresponding-source archive",
+              f"{SOURCE_PAGE} does not link {SOURCE_ARCHIVE} - the offer names no source")
+    rep.check(sec, SOURCE_README.lstrip("/") in page, "source.html links README",
+              "links the manifest of contents",
+              f"{SOURCE_PAGE} does not link {SOURCE_README}")
+    for path in LICENSE_TEXTS:
+        rep.check(sec, path.lstrip("/") in page, f"source.html links {os.path.basename(path)}",
+                  "linked", f"{SOURCE_PAGE} does not link {path}")
+    rep.check(sec, OFFER_CONTACT in page, "written offer", OFFER_CONTACT,
+              f"{SOURCE_PAGE} carries no contact for source requests")
+    rep.check(sec, "AGPL-3.0" in page, "license named", "AGPL-3.0 named on the page",
+              f"{SOURCE_PAGE} never names the license it is complying with")
+    for name in CORRESPONDS:
+        rep.check(sec, name in page, f"source.html names {name}",
+                  "named", f"{SOURCE_PAGE} does not name {name}, which links the engine")
+
+    # --- the offer is reachable from the product ----------------------------
+    st, blob, _n = src.get("/")
+    if st == 200:
+        home = blob.decode("utf-8", "replace")
+        rep.check(sec, "source.html" in home, "home links source.html",
+                  "the offer is reachable from the page that serves the engine",
+                  "index.html does not link source.html - AGPL-3.0 section 13 wants the offer "
+                  "prominent, not merely present at a guessable URL")
+
+    # --- license texts ------------------------------------------------------
+    for path, title in LICENSE_TEXTS.items():
+        st, blob, note = src.get(path)
+        label = os.path.basename(path)
+        if not rep.check(sec, st == 200, label, f"{len(blob):,} bytes",
+                         f"{path} is MISSING (HTTP/FS {st}, {note})"):
+            continue
+        text = blob.decode("utf-8", "replace")
+        rep.check(sec, len(blob) >= LICENSE_TEXT_MIN_BYTES and title in text.upper(),
+                  f"{label} genuine", f"carries the {title} text",
+                  f"{path} is {len(blob):,} bytes and does not contain '{title}' - "
+                  "that is a stub, not the license")
+
+    # --- the README ---------------------------------------------------------
+    st, blob, note = src.get(SOURCE_README)
+    if rep.check(sec, st == 200 and len(blob) >= README_MIN_BYTES, "source/README.md",
+                 f"present, {len(blob):,} bytes",
+                 f"{SOURCE_README} missing or trivial (HTTP/FS {st}, {len(blob):,} bytes)"):
+        readme = blob.decode("utf-8", "replace")
+        rep.check(sec, f"{PROD_ORIGIN}{SOURCE_ARCHIVE}" in readme, "README written offer",
+                  "states where the source lives, on the prod origin",
+                  f"{SOURCE_README} does not state the prod archive URL "
+                  f"{PROD_ORIGIN}{SOURCE_ARCHIVE} - a written offer has to say where")
+
+    # --- the archive itself -------------------------------------------------
+    st, blob, note = src.get(SOURCE_ARCHIVE)
+    if not rep.check(sec, st == 200, "archive present",
+                     f"{len(blob):,} bytes", f"{SOURCE_ARCHIVE} is MISSING (HTTP/FS {st}, {note}) - "
+                     "the page offers a source archive that does not exist"):
+        return
+    if not rep.check(sec, len(blob) >= ARCHIVE_MIN_BYTES, "archive size",
+                     f"{len(blob):,} bytes", f"{SOURCE_ARCHIVE} is only {len(blob):,} bytes, under "
+                     f"the {ARCHIVE_MIN_BYTES:,} floor - it cannot hold the Swiss Ephemeris source"):
+        return
+    try:
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+            names = tf.getnames()
+            rep.ok(sec, "archive readable", f"valid gzip tar, {len(names)} members")
+            present = set(names)
+            for want in ARCHIVE_REQUIRED:
+                full = ARCHIVE_ROOT + want
+                hit = (any(n.startswith(full) for n in present) if want.endswith("/")
+                       else full in present)
+                rep.check(sec, hit, f"archive has {want}", "present",
+                          f"{SOURCE_ARCHIVE} is missing {full} - the page claims it contains this")
+            # The one that matters: does the archived source correspond to the
+            # binary and the code actually being served right now?
+            for name in CORRESPONDS:
+                member = ARCHIVE_ROOT + name
+                st_live, live, _n = src.get("/" + name)
+                if st_live != 200:
+                    rep.fail(sec, f"{name} corresponds",
+                             f"/{name} did not resolve (HTTP/FS {st_live}) but SUNMAP's page "
+                             "loads it as a worker")
+                    continue
+                if member not in present:
+                    continue        # already reported by the manifest loop
+                fh = tf.extractfile(member)
+                archived = fh.read() if fh else b""
+                same = hashlib.sha256(archived).digest() == hashlib.sha256(live).digest()
+                rep.check(sec, same, f"{name} corresponds",
+                          f"archived copy is byte-identical to the served copy "
+                          f"({hashlib.sha256(live).hexdigest()[:16]}...)",
+                          f"the {name} inside {SOURCE_ARCHIVE} is NOT the {name} being served - "
+                          "the archive is stale, so it is not Corresponding Source. Rerun "
+                          "scripts/build_source_archive.py")
+            # Same trap, one level out: the README on disk and the README in the
+            # archive drift apart the moment one is regenerated without the other.
+            st_r, live_readme, _n = src.get(SOURCE_README)
+            member = ARCHIVE_ROOT + "README.md"
+            if st_r == 200 and member in present:
+                fh = tf.extractfile(member)
+                rep.check(sec, (fh.read() if fh else b"") == live_readme, "README corresponds",
+                          "the served README is the one inside the archive",
+                          f"{SOURCE_README} differs from {member} - one of them was regenerated "
+                          "alone. Rerun scripts/build_source_archive.py")
+    except tarfile.TarError as e:
+        rep.fail(sec, "archive readable",
+                 f"{SOURCE_ARCHIVE} is not a readable gzip tar: {e}")
+
+
 # ----------------------------------------------------------------------- main --
 def main() -> int:
     here = os.path.dirname(os.path.abspath(__file__))
@@ -929,6 +1118,7 @@ def main() -> int:
                    page_role(page, sitemap_paths), robots_blocks_all)
 
     audit_site(rep, src, env, pages, sitemap_paths)
+    audit_agpl(rep, src)
     return rep.render()
 
 

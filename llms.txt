@@ -1,0 +1,57 @@
+# SUNMAP
+
+> Sunrise, sunset, twilight, golden hour and the Moon, solved to the second for
+> exactly where you stand. One page, computed in the browser. A product of
+> PUDDY Inc.
+
+SUNMAP resolves the whole solar and lunar day for one location and one local day:
+astronomical, nautical and civil dawn; the morning golden hour; sunrise; solar
+noon; the evening golden hour; sunset; civil, nautical and astronomical dusk;
+solar midnight; and moonrise, lunar noon, moonset and lunar midnight.
+
+## What is authoritative here
+
+- Engine: Swiss Ephemeris (DE441) on the JPL DE441 ephemerides, called through
+  swe_rise_trans, topocentric for the observer's latitude, longitude and elevation.
+- Precision: every instant is resolved to the second, never rounded to the minute.
+- Cross-check: a second implementation sharing no code with the engine verifies
+  the ladder event by event - the solar events against the NOAA Solar Calculator
+  algorithm written longhand, the lunar events against an independent Meeus lunar
+  series, which is coarser and is asked only to catch a wrong day or an inverted
+  crossing.
+- Where the work happens: the ladder is solved in the browser by a Swiss Ephemeris
+  WebAssembly build with the .se1 files shipped alongside it. Place-name search,
+  IP-based location and elevation lookup do call third-party services (Photon,
+  Nominatim, geojs.io, ipinfo.io, open-meteo).
+- Non-events are stated, never invented: polar day, polar night, and a local day
+  containing no moonrise are each reported as such with the reason. An event that
+  does not occur carries no time.
+- Elevation: the dip of the visible horizon is modelled, as
+  horhgt = -(1.76*sqrt(h_metres))/60 degrees fed to swe_rise_trans_true_hor. It
+  applies to sunrise, sunset, moonrise and moonset only. Twilight, golden hour
+  and the transits are defined on the Sun or Moon centre relative to level and
+  do not move with elevation. At or below sea level the dip is zero, though a
+  below-sea-level observer still gets slightly more refraction from the denser
+  air, worth a few seconds on sunrise and sunset.
+- Named limits: the dip assumes a clear horizon at sea level all the way round,
+  so terrain and buildings are not modelled, and refraction at the horizon is the
+  36.7 arcminutes Swiss Ephemeris models, against the classic 34 arcminute
+  convention, while real atmosphere departs from both.
+- Coverage: any day from 1900 to 2099, anywhere on Earth.
+- The prerendered copy a crawler sees is computed for New York City
+  (40.7142, -74.0064); choosing a location recomputes every row on the device.
+
+## Key URLs
+
+- https://sunmap.puddystudios.com/: the application and the full event ladder
+- https://sunmap.puddystudios.com/source.html: complete corresponding source and the open-source licences
+- https://sunmap.puddystudios.com/sitemap.xml: sitemap
+- https://starmap.puddystudios.com/: STARMAP, the sibling product - every
+  celestial event from 1900 to 2099
+
+## Notes
+
+- SUNMAP is a single page. There is no article corpus and no per-city URL space:
+  the day travels in the URL fragment (#d=YYYY-MM-DD) and the location is held on
+  the device, so both are resolved client-side rather than as separate documents.
+- Licence: AGPL-3.0-or-later. Copyright (C) 2026 PUDDY Inc. <legal@puddystudios.com>

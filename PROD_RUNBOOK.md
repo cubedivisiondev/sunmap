@@ -44,14 +44,58 @@ compete with prod in the index.
 
 **1. Rebuild prod from a clean source and re-stage.** Do not ship a stale artifact.
 
+The archive rebuild comes FIRST and comes LAST: it must be built after
+`sunmap-worker.js` is final, or the corresponding source does not correspond and
+the offer is void. `seo_check.py` fails the run if they drift apart, so the gate
+below is what actually enforces the order.
+
 ```bash
 cd sun_map
-python3 scripts/render_page.py --base / --site https://sunmap.puddystudios.com/ --out index.html
+python3 scripts/build_source_archive.py                                    # AGPL archive, after the worker is final
+python3 scripts/render.py --base / --site https://sunmap.puddystudios.com/  # prod = indexable
+python3 scripts/seo_check.py --env prod                                    # MUST exit 0 before any upload
 aws s3 sync . s3://sunmap-puddystudios/ --exclude "scripts/*" --exclude "__pycache__/*" \
-  --exclude "*.pyc" --exclude ".gitignore" --exclude "package.json" --delete
+  --exclude "*.pyc" --exclude ".gitignore" --exclude "package.json" \
+  --exclude "PROD_RUNBOOK.md" --exclude "og/_gallery.html" --exclude "sunmap-app.js" --delete
 aws s3 cp s3://sunmap-puddystudios/vendor/sweph/swisseph.wasm \
   s3://sunmap-puddystudios/vendor/sweph/swisseph.wasm \
   --content-type "application/wasm" --metadata-directive REPLACE
+```
+
+The last three excludes are load-bearing, not tidiness. This sync is a denylist
+over the whole directory, so anything not named here goes public on a host that
+`robots.txt` opens with `Allow: /` and that is meant to be indexed:
+
+- `PROD_RUNBOOK.md` - this file. It carries both bucket names, both distribution
+  IDs, the CloudFront domains, the dev password-gate name and the rollback
+  procedure. STARMAP prod returns 404 for `/PROD_RUNBOOK.md`; match that.
+- `og/_gallery.html` - the internal OG review page. STARMAP's runbook excludes
+  `_gallery.html` by name under the comment "NEVER ship the internal galleries
+  or review mocks", and STARMAP prod returns 404 for it.
+- `sunmap-app.js` - dead code. Nothing references it: `index.html` and `sw.js`
+  both have zero mentions. It is a leftover of the `render_sunmap.py` era.
+
+Verify after the sync, before announcing:
+
+```bash
+for p in PROD_RUNBOOK.md og/_gallery.html sunmap-app.js; do
+  curl -s -o /dev/null -w "$p %{http_code} (expect 403 or 404)\n" "https://sunmap.puddystudios.com/$p"
+done
+```
+
+The sync must NOT exclude `source/` - that directory is the AGPL compliance
+surface, not build scrap. Never pass `--content-encoding gzip` for the archive:
+the client would transparently decompress it and `tar xzf` would then fail on a
+file still named `.tar.gz`. STARMAP serves it as plain `application/x-tar` with
+no content-encoding, which downloads intact; match that.
+
+Optional, cosmetic only: `source/README.md` lands as `binary/octet-stream` and
+downloads instead of displaying. Reachability is what the license requires, so
+this is not a blocker, but one line fixes it:
+
+```bash
+aws s3 cp s3://sunmap-puddystudios/source/README.md s3://sunmap-puddystudios/source/README.md \
+  --content-type "text/plain; charset=utf-8" --metadata-directive REPLACE
 ```
 
 **2. Enable the distribution.**
@@ -76,9 +120,22 @@ the name must not be looked up before it exists.
 ```bash
 curl -sI https://sunmap.puddystudios.com/ | head -3          # expect 200, no 401
 curl -s https://sunmap.puddystudios.com/ | grep -c noindex   # expect 0
-for p in sunmap-worker.js sunmap-geo.js vendor/sweph/swisseph.wasm data/ephe/semo_18.se1; do
+curl -s https://sunmap.puddystudios.com/robots.txt           # expect Allow: / + the Sitemap line
+for p in sunmap-worker.js sunmap-geo.js vendor/sweph/swisseph.wasm data/ephe/semo_18.se1 \
+         source.html source/corresponding-source.tar.gz source/README.md \
+         source/AGPL-3.0.txt source/GPL-3.0.txt sitemap.xml; do
   curl -s -o /dev/null -w "$p %{http_code} %{content_type}\n" "https://sunmap.puddystudios.com/$p"
 done
+
+# The archive must survive the round trip as a real gzip, and the worker inside
+# it must be the worker being served. This is the compliance proof, not a link check.
+curl -sI https://sunmap.puddystudios.com/source/corresponding-source.tar.gz | grep -i content-encoding \
+  && echo "STOP: content-encoding set - tar xzf will fail" || echo "ok: no content-encoding"
+curl -s https://sunmap.puddystudios.com/source/corresponding-source.tar.gz -o /tmp/sunmap-cs.tgz
+tar xzOf /tmp/sunmap-cs.tgz corresponding-source/sunmap-worker.js | shasum -a 256
+curl -s https://sunmap.puddystudios.com/sunmap-worker.js | shasum -a 256   # must match the line above
+
+python3 scripts/seo_check.py --url https://sunmap.puddystudios.com/         # must exit 0
 ```
 
 The engine must return `application/wasm` or streaming compilation silently
@@ -92,13 +149,25 @@ takes prod dark. The dev surface is unaffected by both.
 
 ## Before prod goes public, decide these
 
-- **OG cards.** None exist yet. Link previews will be bare until they do.
-- **Service worker.** SUNMAP has no offline cache. STARMAP ships one; this does not.
-- **AGPL source offer.** The worker header points at
-  `https://sunmap.puddystudios.com/source.html`, which does not exist yet.
-  SUNMAP serves the same Swiss Ephemeris WebAssembly build STARMAP does, under the
-  same free AGPL-3.0 option, so the same obligation applies: the complete
-  corresponding source and a written offer must be reachable at that URL **before**
-  the page is served publicly. Staging it is a copy of STARMAP's `source/` tree
-  plus a `source.html`. This is a compliance blocker, not a nicety.
-- **Sitemap and robots.txt.** Neither is generated yet.
+- **AGPL source offer. CLOSED 2026-08-11.** SUNMAP serves the byte-identical Swiss
+  Ephemeris WebAssembly build STARMAP serves, under the same free AGPL-3.0 option,
+  so it owes the Corresponding Source from the same place it serves the binary
+  (GPL-3.0 section 6(d) - an email offer does not satisfy that clause). The surface
+  now exists and mirrors STARMAP's: `source.html` carries the offer and the license
+  summary; `source/corresponding-source.tar.gz` carries the Swiss Ephemeris 2.10.03
+  C source, the `swisseph-wasm@0.0.5` npm package, prolaxu's build harness with
+  `compile.sh`, both full license texts, and SUNMAP's own `sunmap-worker.js` and
+  `sunmap-geo.js`; `source/README.md` is the written offer plus a SHA-256 manifest;
+  `source/AGPL-3.0.txt` and `source/GPL-3.0.txt` are the full texts. Built by
+  `scripts/build_source_archive.py`, which refuses to emit an archive whose engine
+  files do not match the served binary. `scripts/seo_check.py` fails the run if any
+  of it is missing or if the archived worker has drifted from the served one.
+- **OG cards.** Five exist in `og/` (landscape, youtube, square, pin, story) and
+  `og/sunmap-og.png` is what the page and sitemap reference.
+- **Service worker.** `sw.js` is emitted by `scripts/render.py` with a
+  content-hashed cache key.
+- **Sitemap and robots.txt.** Both are emitted by `scripts/render.py`. The prod
+  build gets `Allow: /` plus a `Sitemap:` line; any non-prod `--site` gets a
+  Disallow-all robots.txt and a `noindex,nofollow` meta on every page. Confirmed by
+  building both and diffing: the only differences are the noindex meta and the
+  OG/JSON-LD image host. Canonical is the prod host in both.

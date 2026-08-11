@@ -2,5 +2,5 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later
      Copyright (C) 2026 PUDDY Inc. <legal@puddystudios.com> -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
-<url><loc>https://sunmap.puddystudios.com/</loc><lastmod>2026-08-10</lastmod><changefreq>daily</changefreq><priority>1.0</priority><image:image><image:loc>https://sunmap.puddy.dev/og/sunmap-og.png</image:loc><image:title>SUNMAP - Sunrise, Sunset and Twilight, Timed to the Second</image:title></image:image></url>
+<url><loc>https://sunmap.puddystudios.com/</loc><lastmod>2026-08-11</lastmod><changefreq>daily</changefreq><priority>1.0</priority><image:image><image:loc>https://sunmap.puddystudios.com/og/sunmap-og.png</image:loc><image:title>SUNMAP - Sunrise, Sunset and Twilight, Timed to the Second</image:title></image:image></url>
 </urlset>

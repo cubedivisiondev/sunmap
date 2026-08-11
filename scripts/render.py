@@ -20,7 +20,14 @@ via the CloudFront header).
 
 Also emits manifest.json, sw.js, sitemap.xml, robots.txt, 404.html and
 source.html (the AGPL-3.0 corresponding-source offer the worker header points
-at - serving the page without it is a licence violation, not a nicety).
+at - serving the page without it is a license violation, not a nicety).
+
+source.html is the OFFER; the SOURCE ITSELF is source/, built separately by
+scripts/build_source_archive.py and committed. GPL-3.0 section 6(d) wants the
+source reachable "in the same way through the same place" as the binary, so the
+archive is a file on this origin, not an email address. Rebuild it whenever
+sunmap-worker.js changes, or the offer stops corresponding to what is served;
+scripts/seo_check.py fails the run if that happens.
 
 WHERE THE DATA COMES FROM
   build time  scripts/solar.py  -> the prerendered crawlable ladder + the FAQ,
@@ -405,7 +412,7 @@ __JSONLD__
     <div class="locwrap">
       <div class="locrow">
         <input id="tz-search" placeholder="CHOOSE YOUR LOCATION" autocomplete="off" role="combobox" aria-expanded="false" aria-label="Choose your location - City, address, or zip">
-        <button type="button" id="loc-here" aria-label="Use my device location" title="Use my device location"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="6"/><line x1="12" y1="1.5" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22.5"/><line x1="1.5" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22.5" y2="12"/></svg></button>
+        <button type="button" id="loc-here" aria-label="Use my device location" title="Use my device location"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="6"/><line x1="12" y1="1.5" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22.5"/><line x1="1.5" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22.5" y2="12"/></svg></button>
       </div>
       <div id="loc-suggest" role="listbox" aria-label="Location suggestions"></div>
     </div>
@@ -736,17 +743,29 @@ function buildControls(){
   seg('range',[['now','From now'],['all','All day']],range,k=>range=k);
   seg('frame',[['sea','Sea level'],['ground','Your elevation']],frame,k=>{frame=k;compute();});
   seg('engine',[['h12','12-hour'],['h24','24-hour']],engine,k=>engine=k);
-  /* MEASURED, not assumed. Swiss swe_rise_trans takes the observer's altitude
-     into its internal PRESSURE model, so thinner air refracts less and sunrise
-     lands slightly LATER, sunset slightly EARLIER. It does NOT model the
-     geometric dip of the horizon you get from standing high up. At 1000 m the
-     measured shift is +23 s on sunrise; true dip would be minutes, the other
-     way. Say what the engine does, and name what it does not. */
+  /* MEASURED, not assumed, and the toggle drives the effect that actually
+     matters. Swiss's own altitude argument only feeds an internal PRESSURE
+     model - thinner air refracts less - which moved the 2026-08-12 LA sunrise
+     +2.4 s at 101 m, +23.0 s at 1000 m and +62.6 s at 3000 m: LATER as you
+     climb, which is backwards for anyone standing on a mountain. What a human
+     up there experiences is the horizon falling away, and SUNMAP supplies that
+     to Swiss as horhgt = -(1.76*sqrt(h))/60 degrees. Same sunrise, same day:
+     -103.2 s, -321.5 s, -547.3 s. The dip formula here is the one in
+     scripts/solar.py, so the label and the engine cannot drift apart. */
   const fn=$('frame-note');
-  if(fn)fn.textContent=(loc&&loc.alt)
-    ?('Elevation '+Math.round(loc.alt)+' m - Thinner air refracts less, so sunrise lands a little '
-      +'later and sunset a little earlier. The geometric dip of a high horizon is not modelled.')
-    :'No elevation known for this point, so both settings agree.';
+  const dipDeg=(loc&&loc.alt>0)?1.76*Math.sqrt(loc.alt)/60:0;
+  if(fn)fn.textContent=dipDeg
+    ?('Elevation '+Math.round(loc.alt)+' m - From up here the horizon falls '+dipDeg.toFixed(2)
+      +' degrees below level, so the Sun and Moon clear it earlier and set later. Sea level ignores '
+      +'that drop. Twilight and golden hour do not move either way. Both settings assume a clear '
+      +'horizon at sea level all the way round, so a ridge or a building to your east delays '
+      +'sunrise by an amount no ephemeris can know.')
+    :(loc&&loc.alt<0)
+      ?('Elevation '+Math.round(loc.alt)+' m - Below sea level the horizon sits at your own level, '
+        +'so there is no drop to model and no dip is applied. The denser air down here does refract '
+        +'a little more, so Your elevation still lands sunrise a few seconds earlier and sunset a '
+        +'few seconds later than Sea level. Twilight and golden hour do not move either way.')
+      :'No elevation known for this point, so both settings agree.';
   $('tz-active').textContent=locLabelTZ();
   initLocationBox();
 
@@ -1742,18 +1761,32 @@ def _build_page(d):
                     .replace('None - ', '').rstrip('.') + '.')
         faq.append((q4, a4, _html.escape(a4)))
 
+    # Say exactly what the cross-check covers. scripts/verify_solar.py models the
+    # Sun with the NOAA Solar Calculator written longhand, and states in its own
+    # header that NOAA has no lunar theory at all - the Moon is checked against a
+    # separate abbreviated Meeus series at a much coarser tolerance. Claiming NOAA
+    # over the whole ladder, moonrise included, was more than the harness proves.
     acc = ('Every instant is computed with the Swiss Ephemeris (DE441) on the JPL DE441 ephemerides '
            'and resolved to the second, topocentrically, for a specific latitude, longitude and '
-           'elevation. An independent NOAA-algorithm implementation verifies the ladder event by '
-           'event. The remaining uncertainty is not in the arithmetic, it is in the air: standard '
-           'refraction at the horizon is 34 arcminutes and real atmosphere departs from it, so an '
+           'elevation. A second implementation that shares no code with the engine verifies the '
+           'ladder event by event: the solar events against the NOAA Solar Calculator algorithm, '
+           'the lunar ones against an independent Meeus lunar series, which is coarser and is asked '
+           'only to catch a wrong day or an inverted crossing. The remaining uncertainty is not in '
+           'the arithmetic, it is in the air: the engine works to the 36.7 arcminutes of horizon '
+           'refraction Swiss Ephemeris models, where the classic almanac convention is 34, and real '
+           'atmosphere departs from both, so an '
            'observed sunrise against a real horizon can differ from any computed one by a few tens '
-           'of seconds. Two limits are worth naming plainly. These times assume a level horizon at '
-           'your own altitude, so the geometric dip you gain standing on a mountain, and the delay '
-           'from a ridge or a building in the way, are not modelled. And your elevation is used for '
-           'the air pressure at your altitude, which makes sunrise marginally later rather than '
-           'earlier. Every other almanac rounds to the minute and hides all of it. SUNMAP prints '
-           'the second and names the limit.')
+           'of seconds. Your elevation is modelled where it counts. Stand high and the horizon '
+           'falls away below you, 0.29 degrees at 101 metres and 1.61 degrees at 3000 metres, so '
+           'the Sun clears it earlier and sets later: at 3000 metres sunrise lands about nine '
+           'minutes earlier than it does at the shore. That dip applies to sunrise, sunset, '
+           'moonrise and moonset, the four events defined by the horizon you can actually see. '
+           'Twilight and golden hour are angles of the Sun centre measured from level, so they do '
+           'not move with your elevation at all. One limit is worth naming plainly, and it is the '
+           'ground: the dip assumes a clear horizon at sea level all the way round, so a ridge or '
+           'a building to your east delays sunrise by an amount no ephemeris can know. Every other '
+           'almanac rounds to the minute and hides all of it. SUNMAP prints the second and names '
+           'the limit.')
     faq.append(('How accurate are these sunrise and sunset times?', acc, _html.escape(acc)))
 
     fh = [f'<h2>{_html.escape(_long(d))} - Frequently Asked Questions</h2>',
@@ -1803,6 +1836,15 @@ def _build_page(d):
     tw_title = title
 
     # --- JSON-LD ---
+    # One PropertyValue per row the ladder actually renders. propertyID is the
+    # engine key (the only thing that separates the morning golden hour from the
+    # evening one - they share a visible label), name is the label printed on the
+    # row, and description is the geometric definition PREC prints under it. The
+    # list is derived from the engine ladder itself, so it cannot drift from the
+    # page: adding a row to solar.LADDER adds it here in the same build.
+    measured = [{'@type': 'PropertyValue', 'propertyID': _k, 'name': _lab,
+                 'description': f'{"Sun" if _body == "sun" else "Moon"}: {PREC[_k]}'}
+                for _k, _lab, _body in _LADDER_JS]
     crumbs = [{'@type': 'ListItem', 'position': 1, 'name': 'Puddy Studios', 'item': 'https://puddystudios.com/'},
               {'@type': 'ListItem', 'position': 2, 'name': 'Sunmap', 'item': PROD}]
     ld = {'@context': 'https://schema.org', '@graph': [
@@ -1822,6 +1864,10 @@ def _build_page(d):
          'description': ('The whole solar and lunar day timed to the second on the Swiss Ephemeris '
                          'engine, topocentric to the observer.'),
          'about': ['Sunrise', 'Sunset', 'Twilight', 'Golden hour', 'Moonrise', 'Solar noon', 'Day length'],
+         'inLanguage': 'en',
+         'isAccessibleForFree': True,
+         'publisher': {'@id': 'https://puddystudios.com/#org'},
+         'mainEntity': {'@id': f'{page_url}#dataset'},
          'breadcrumb': {'@id': f'{page_url}#breadcrumb'}},
         {'@type': 'BreadcrumbList', '@id': f'{page_url}#breadcrumb', 'itemListElement': crumbs},
         {'@type': 'Dataset', '@id': f'{page_url}#dataset',
@@ -1829,8 +1875,10 @@ def _build_page(d):
          'description': ('Sunrise, sunset, astronomical, nautical and civil twilight, both golden '
                          'hours, solar noon and solar midnight, moonrise, moonset, lunar noon and '
                          'lunar midnight - Solved to the second from the Swiss Ephemeris (DE441), '
-                         'topocentrically for the observer, and cross-checked against an '
-                         'independent NOAA-algorithm implementation.'),
+                         'topocentrically for the observer. Cross-checked event by event against a '
+                         'second implementation sharing no code with the engine: the solar events '
+                         'against the NOAA Solar Calculator algorithm, the lunar events against an '
+                         'independent Meeus lunar series.'),
          'url': page_url, 'image': og_img,
          'keywords': ['sunrise', 'sunset', 'twilight', 'golden hour', 'moonrise', 'moonset',
                       'solar noon', 'day length'],
@@ -1838,16 +1886,42 @@ def _build_page(d):
          'spatialCoverage': {'@type': 'Place', 'name': OBS_LABEL,
                              'geo': {'@type': 'GeoCoordinates', 'latitude': OBS_LAT, 'longitude': OBS_LON}},
          'creator': {'@id': 'https://puddystudios.com/#org'},
+         'publisher': {'@id': 'https://puddystudios.com/#org'},
+         'inLanguage': 'en',
+         'isAccessibleForFree': True,
          'measurementTechnique': ('Swiss Ephemeris DE441 swe_rise_trans, topocentric; independent '
-                                  'NOAA-algorithm cross-check'),
+                                  'cross-check (NOAA Solar Calculator for the Sun, Meeus lunar '
+                                  'series for the Moon)'),
          'license': 'https://puddystudios.com/terms',
-         'variableMeasured': 'Topocentric altitude threshold crossing times of the Sun and Moon'},
+         'variableMeasured': measured},
         {'@type': 'WebApplication', '@id': f'{PROD}#app', 'name': 'SUNMAP',
          'url': PROD, 'image': og_img, 'applicationCategory': 'UtilitiesApplication',
          'operatingSystem': 'Any', 'browserRequirements': 'Requires JavaScript',
          'description': ('The whole solar and lunar day - Sunrise, sunset, twilight, golden hour '
                          'and the Moon - Solved to the second on your own device for exactly where '
                          'you stand. Installable and offline-capable.'),
+         'publisher': {'@id': 'https://puddystudios.com/#org'},
+         'inLanguage': 'en',
+         'isAccessibleForFree': True,
+         'installUrl': PROD,
+         # Every line below is a control or an output the page actually ships:
+         # the four segmented dials (range, elevation frame, clock), the location
+         # box, the day wheels bounded by YEARS, and the manifest + service worker.
+         # Nothing aspirational goes in this list.
+         'featureList': [
+             'Sunrise, sunset, solar noon and solar midnight to the second',
+             'Astronomical, nautical and civil dawn and dusk',
+             'Morning and evening golden hour',
+             'Moonrise, moonset, lunar noon and lunar midnight, with the Moon '
+             'illumination and apparent diameter',
+             f'Any day from {YEARS[0]} to {YEARS[-1]}',
+             'Search any place by name, or use your device location',
+             'Sea-level horizon, or your own elevation with the true dip of the '
+             'horizon applied to sunrise, sunset, moonrise and moonset',
+             '12-hour or 24-hour clock',
+             'The whole ladder is solved on your device by a Swiss Ephemeris '
+             'WASM engine, not fetched from a server',
+             'Installable, and works offline'],
          'offers': {'@type': 'Offer', 'price': '0', 'priceCurrency': 'USD'}},
         {'@type': 'FAQPage', '@id': f'{page_url}#faq', 'mainEntity': [
             {'@type': 'Question', 'name': q, 'acceptedAnswer': {'@type': 'Answer', 'text': a}} for q, a in faq]},
@@ -1939,6 +2013,71 @@ _ROBOTS_HDR = ('# SPDX-License-Identifier: AGPL-3.0-or-later\n'
     _ROBOTS_HDR + (('User-agent: *\nAllow: /\n\nSitemap: %ssitemap.xml\n' % PROD) if INDEXABLE
                    else 'User-agent: *\nDisallow: /\n'))  # the demo host asks not to be crawled at all
 
+# ---------------- llms.txt ----------------
+# The emerging root-level convention for machine readers: what the site is, what
+# is authoritative about it, and where to go. Deliberately short, and every claim
+# is one this build can back - the engine, the precision, what the cross-check
+# actually covers, and what runs off-device. URLs are PROD for the same reason
+# every canonical is: the demo host must never present itself as the source.
+(SUN / 'llms.txt').write_text(f"""# SUNMAP
+
+> Sunrise, sunset, twilight, golden hour and the Moon, solved to the second for
+> exactly where you stand. One page, computed in the browser. A product of
+> PUDDY Inc.
+
+SUNMAP resolves the whole solar and lunar day for one location and one local day:
+astronomical, nautical and civil dawn; the morning golden hour; sunrise; solar
+noon; the evening golden hour; sunset; civil, nautical and astronomical dusk;
+solar midnight; and moonrise, lunar noon, moonset and lunar midnight.
+
+## What is authoritative here
+
+- Engine: Swiss Ephemeris (DE441) on the JPL DE441 ephemerides, called through
+  swe_rise_trans, topocentric for the observer's latitude, longitude and elevation.
+- Precision: every instant is resolved to the second, never rounded to the minute.
+- Cross-check: a second implementation sharing no code with the engine verifies
+  the ladder event by event - the solar events against the NOAA Solar Calculator
+  algorithm written longhand, the lunar events against an independent Meeus lunar
+  series, which is coarser and is asked only to catch a wrong day or an inverted
+  crossing.
+- Where the work happens: the ladder is solved in the browser by a Swiss Ephemeris
+  WebAssembly build with the .se1 files shipped alongside it. Place-name search,
+  IP-based location and elevation lookup do call third-party services (Photon,
+  Nominatim, geojs.io, ipinfo.io, open-meteo).
+- Non-events are stated, never invented: polar day, polar night, and a local day
+  containing no moonrise are each reported as such with the reason. An event that
+  does not occur carries no time.
+- Elevation: the dip of the visible horizon is modelled, as
+  horhgt = -(1.76*sqrt(h_metres))/60 degrees fed to swe_rise_trans_true_hor. It
+  applies to sunrise, sunset, moonrise and moonset only. Twilight, golden hour
+  and the transits are defined on the Sun or Moon centre relative to level and
+  do not move with elevation. At or below sea level the dip is zero, though a
+  below-sea-level observer still gets slightly more refraction from the denser
+  air, worth a few seconds on sunrise and sunset.
+- Named limits: the dip assumes a clear horizon at sea level all the way round,
+  so terrain and buildings are not modelled, and refraction at the horizon is the
+  36.7 arcminutes Swiss Ephemeris models, against the classic 34 arcminute
+  convention, while real atmosphere departs from both.
+- Coverage: any day from {YEARS[0]} to {YEARS[-1]}, anywhere on Earth.
+- The prerendered copy a crawler sees is computed for {OBS_LABEL}
+  ({OBS_LAT}, {OBS_LON}); choosing a location recomputes every row on the device.
+
+## Key URLs
+
+- {PROD}: the application and the full event ladder
+- {PROD}source.html: complete corresponding source and the open-source licences
+- {PROD}sitemap.xml: sitemap
+- https://starmap.puddystudios.com/: STARMAP, the sibling product - every
+  celestial event from 1900 to 2099
+
+## Notes
+
+- SUNMAP is a single page. There is no article corpus and no per-city URL space:
+  the day travels in the URL fragment (#d=YYYY-MM-DD) and the location is held on
+  the device, so both are resolved client-side rather than as separate documents.
+- Licence: AGPL-3.0-or-later. Copyright (C) 2026 PUDDY Inc. <legal@puddystudios.com>
+""")
+
 _nf = ('<!DOCTYPE html>'
        '<!-- SPDX-License-Identifier: AGPL-3.0-or-later'
        ' | Copyright (C) 2026 PUDDY Inc. <legal@puddystudios.com> -->'
@@ -1969,7 +2108,7 @@ _src = ('<!DOCTYPE html>'
         '<title>SUNMAP | Source and Open-Source Licenses</title>'
         '<meta name="description" content="Complete Corresponding Source and license information '
         'for the open-source components SUNMAP serves (Swiss Ephemeris, AGPL-3.0).">'
-        '<link rel="canonical" href="' + PROD + 'source.html">'
+        '<link rel="canonical" href="' + PROD + 'source.html">' + ROBOTS +
         '<link rel="icon" type="image/svg+xml" sizes="any" href="' + BASE + 'favicon.svg">'
         '<link rel="icon" type="image/x-icon" href="' + BASE + 'favicon.ico">'
         '<style>'
@@ -1984,8 +2123,8 @@ _src = ('<!DOCTYPE html>'
         '.dl{color:#fff;text-decoration:underline}</style></head><body>'
         '<h1>Source &amp; Open-Source Licenses</h1>'
         '<p class="lead">SUNMAP is a product of PUDDY Inc. It runs open-source software on your '
-        'device; this page provides the corresponding source and licenses, as those licenses '
-        'require.</p>'
+        'device; this page provides the complete corresponding source and licenses, as required by '
+        'those licenses.</p>'
         '<h2>What runs on your device</h2>'
         '<p>SUNMAP computes your whole solar and lunar day in your browser using the '
         '<b>Swiss Ephemeris</b> astronomical library (&copy; Astrodienst AG), compiled to '
@@ -1996,25 +2135,37 @@ _src = ('<!DOCTYPE html>'
         '(<code>sunmap-worker.js</code>) forms a combined work with it and is likewise licensed '
         '<b>AGPL-3.0-or-later</b> (&copy; 2026 PUDDY Inc.)</p>'
         '<h2>Complete Corresponding Source</h2>'
-        '<p>In accordance with GPL-3.0 section 6(d) and AGPL-3.0 section 13, the corresponding '
-        'source is available here at no charge. The running binary and our calling code are served '
-        'directly from this site:</p><ul>'
+        '<p>In accordance with GPL-3.0 section 6(d) and AGPL-3.0 section 13, the complete '
+        'corresponding source - the Swiss Ephemeris 2.10.03 C source, the '
+        '<code>swisseph-wasm</code> 0.0.5 package source and its Emscripten build script, and our '
+        'calling code - is available here at no charge, from the same origin that serves the '
+        'binary:</p><ul>'
+        '<li><a class="dl" href="' + BASE + 'source/corresponding-source.tar.gz">'
+        'corresponding-source.tar.gz</a> (complete archive)</li>'
+        '<li><a class="dl" href="' + BASE + 'source/README.md">Corresponding-source README</a> '
+        '(contents, exact versions, SHA-256 manifest, rebuild steps)</li>'
         '<li>The running binary: <a href="' + BASE + 'vendor/sweph/swisseph.wasm">swisseph.wasm</a>, '
         '<a href="' + BASE + 'vendor/sweph/swisseph.js">swisseph.js</a>, '
-        '<a href="' + BASE + 'vendor/sweph/LICENSE.txt">upstream LICENSE</a>, '
-        '<a href="' + BASE + 'vendor/sweph/SOURCES.md">SOURCES.md</a> (versions and rebuild steps)</li>'
+        '<a href="' + BASE + 'vendor/sweph/LICENSE.txt">upstream LICENSE</a></li>'
         '<li>Our code: <a href="' + BASE + 'sunmap-worker.js">sunmap-worker.js</a> (the AGPL combined '
         'work), <a href="' + BASE + 'sunmap-geo.js">sunmap-geo.js</a></li></ul>'
-        '<p>The Swiss Ephemeris 2.10.03 C source and the <code>swisseph-wasm</code> package source '
-        'with its Emscripten build script are available on written request at no charge: '
-        '<b>legal@puddystudios.com</b>. They are also published upstream at the links below.</p>'
+        '<p>No account, no charge and no request is required to obtain any of the above. If a link '
+        'fails, write to <b>legal@puddystudios.com</b> and PUDDY Inc. will supply the complete '
+        'corresponding source at no charge.</p>'
+        '<h2>Full license texts</h2><ul>'
+        '<li><a class="dl" href="' + BASE + 'source/AGPL-3.0.txt">'
+        'GNU Affero General Public License v3.0</a></li>'
+        '<li><a class="dl" href="' + BASE + 'source/GPL-3.0.txt">'
+        'GNU General Public License v3.0</a></li></ul>'
         '<p class="lead" style="color:rgba(255,255,255,.6)">A note on the bundled '
         '<a href="' + BASE + 'vendor/sweph/LICENSE.txt">vendor/sweph/LICENSE.txt</a>: that file is '
         'the <code>swisseph-wasm</code> wrapper author\'s older license summary (&copy; 2024 prolaxu). '
         'It describes the Swiss Ephemeris as free for non-commercial use with a commercial license '
         'required otherwise. That summary predates Astrodienst\'s relicensing of the Swiss Ephemeris '
-        'under the GNU Affero General Public License. SUNMAP\'s governing terms are <b>AGPL-3.0</b>, '
-        'and SUNMAP complies by providing the corresponding source above and on request.</p>'
+        'under the GNU Affero General Public License. SUNMAP\'s governing terms are <b>AGPL-3.0</b>; '
+        'the authoritative license is <code>swisseph-2.10.03/LICENSE</code> inside the archive above '
+        '(full AGPL text also linked above), and SUNMAP complies by providing the complete '
+        'corresponding source on this page at no charge.</p>'
         '<h2>Upstream provenance</h2><ul>'
         '<li>Swiss Ephemeris 2.10.03 - Astrodienst AG: '
         '<a href="https://www.astro.com/swisseph/">astro.com/swisseph</a>, '
@@ -2022,9 +2173,9 @@ _src = ('<!DOCTYPE html>'
         '<li><code>swisseph-wasm</code> 0.0.5: '
         '<a href="https://github.com/prolaxu/swisseph-wasm">github.com/prolaxu/swisseph-wasm</a>, '
         '<a href="https://www.npmjs.com/package/swisseph-wasm">npm</a></li>'
-        '<li>Full license texts: '
-        '<a href="https://www.gnu.org/licenses/agpl-3.0.txt">AGPL-3.0</a>, '
-        '<a href="https://www.gnu.org/licenses/gpl-3.0.txt">GPL-3.0</a></li></ul>'
+        '<li>License texts upstream: '
+        '<a href="https://www.gnu.org/licenses/agpl-3.0.txt">gnu.org/licenses/agpl-3.0.txt</a>, '
+        '<a href="https://www.gnu.org/licenses/gpl-3.0.txt">gnu.org/licenses/gpl-3.0.txt</a></li></ul>'
         '<h2>Ephemeris data</h2>'
         '<p>The engine reads Swiss Ephemeris data files (<code>seas_18.se1</code>, '
         '<code>semo_18.se1</code>, <code>sepl_18.se1</code>). These are astronomical data, not '
@@ -2039,7 +2190,8 @@ _src = ('<!DOCTYPE html>'
         'Source requests: legal@puddystudios.com</p>'
         '</body></html>')
 (SUN / 'source.html').write_text(_src)
-print('wrote sitemap.xml (1 URL, image extension) + robots.txt + favicon.svg + 404.html + source.html')
+print('wrote sitemap.xml (1 URL, image extension) + robots.txt + llms.txt + favicon.svg '
+      '+ 404.html + source.html')
 
 # ---------------- PWA: manifest.json + sw.js ----------------
 _manifest = {

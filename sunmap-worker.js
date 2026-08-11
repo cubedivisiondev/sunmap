@@ -58,6 +58,20 @@
  *     Without this the fallback and the primary solver disagree by 10 to 60
  *     seconds and a rescued sunset sits out of line with the days either side.
  *
+ *   - THE HORIZON DROPS AWAY BENEATH AN ELEVATED OBSERVER, so the Sun clears it
+ *     EARLIER on a mountain than at the shore. Swiss does not model that. The
+ *     observer altitude in geopos feeds an internal air PRESSURE model - thinner
+ *     air, less refraction - and nothing else, an effect that is both tiny and
+ *     BACKWARDS: measured at 33.9772 N, 118.4489 W for the 2026-08-12 sunrise,
+ *     altitude alone moves it +2.4 s at 101 m, +23.0 s at 1000 m, +62.6 s at
+ *     3000 m. Later as you climb. So the dip of the horizon is supplied
+ *     explicitly as horhgt = -dip through swe_rise_trans_true_hor, which moves
+ *     the same sunrise -103.2 s, -321.5 s and -547.3 s, and Swiss's pressure
+ *     effect rides on top untouched. It applies to the four HORIZON_EVENTS
+ *     only - never to a transit, which has no horizon in its definition, and
+ *     never to the twilight or golden-hour bands, which are angles of the Sun's
+ *     CENTRE measured from level.
+ *
  *   - The moon block is TOPOCENTRIC: the Moon overhead is about 1.7 percent
  *     wider than the Moon on the geocentric books, and apparent_diameter_arcsec
  *     should mean what the observer would actually measure.
@@ -94,12 +108,14 @@ const EPHE_FILES = ['seas_18.se1', 'semo_18.se1', 'sepl_18.se1'];
  * The twilight and golden-hour thresholds are exact: swe_rise_trans lands on
  * them to better than 0.1 arcsec, measured.
  *
- * Rise and set are not a constant. The threshold is minus the sum of the
- * body's semidiameter and the refraction at the horizon, the semidiameter
- * moves with distance, and the refraction swe_rise_trans applies depends on
- * the observer's altitude through an internal pressure model that the public
- * refraction API does not expose. So RISE_SET is a sentinel: the threshold is
- * calibrated from Swiss itself per site. See refraction() in makeTrack. */
+ * Rise and set are not a constant. The threshold is minus the sum of the body's
+ * semidiameter and the depression of the horizon, the semidiameter moves with
+ * distance, and the depression is two things at once: the refraction
+ * swe_rise_trans applies, which depends on the observer's altitude through an
+ * internal pressure model the public refraction API does not expose, plus the
+ * dip this observer's elevation buys them. So RISE_SET is a sentinel: the
+ * threshold is calibrated from Swiss itself per site, through the same call the
+ * primary solver makes. See horizonDepression() in makeTrack. */
 const RISE_SET = null;
 const ALT_CIVIL = -6.0;
 const ALT_NAUTICAL = -12.0;
@@ -113,6 +129,30 @@ const GOLDEN_HIGH = 6.0;
  * day or night where the nearest rise or set is weeks away and the body is
  * degrees clear of the horizon anyway. */
 const DEFAULT_HORIZON_REFRACTION = 36.739 / 60.0;
+
+/* The dip of the horizon, in arcminutes per square root of a metre of observer
+ * height. 1.76 is the standard nautical value: it already carries the standard
+ * terrestrial refraction along the long, low sight-line to the sea horizon,
+ * which bends it back up a little. The purely geometric drop, ignoring air, is
+ * 1.93 arcmin - arccos(R / (R + h)) with R the Earth's radius.
+ *
+ * Corroborated against Swiss's own dip, which it computes but does not apply to
+ * rise and set: swe_refrac_extended returns -0.3224, -1.0145 and -1.7570 deg at
+ * 101, 1000 and 3000 m, against -0.2948, -0.9276 and -1.6067 here. Same sign,
+ * same size, differing only in the atmospheric model. */
+const DIP_ARCMIN_PER_SQRT_METRE = 1.76;
+
+/**
+ * Degrees the visible horizon drops below level, for an observer altM up.
+ *
+ * Zero at and below sea level. A negative geodetic altitude is not a pit with a
+ * raised horizon - Death Valley and the Dead Sea shore both see a horizon at
+ * their own level - so the dip floors at zero rather than going NaN.
+ */
+function horizonDipDeg(altM) {
+  const h = Number(altM);
+  return DIP_ARCMIN_PER_SQRT_METRE * Math.sqrt(Number.isFinite(h) && h > 0 ? h : 0) / 60.0;
+}
 
 const RISE = 'rise', SET = 'set', TRANSIT_UP = 'transit_up', TRANSIT_DOWN = 'transit_down';
 
@@ -144,12 +184,42 @@ const LADDER = [
 const LADDER_INDEX = Object.create(null);
 LADDER.forEach((row, i) => { LADDER_INDEX[row[0]] = i; });
 
+/* The four events defined by the VISIBLE horizon, and the only ones the dip
+ * touches. Everything else in the ladder is defined against LEVEL: a transit has
+ * no horizon in it at all, and the twilight and golden-hour bands are angles of
+ * the Sun's centre below or above level, unchanged by how far the observer can
+ * see. Named explicitly rather than inferred, so that adding a ladder row can
+ * never silently opt it in or out - and cross-checked against the structure of
+ * the ladder here, at load, because a mismatch would be a wrong TIME. */
+const HORIZON_EVENTS = new Set(['sunrise', 'sunset', 'moonrise', 'moonset']);
+{
+  const structural = LADDER
+    .filter((r) => r[4] === 'rsmi' && r[6] === null && (r[3] === RISE || r[3] === SET))
+    .map((r) => r[0]);
+  if (structural.length !== HORIZON_EVENTS.size || !structural.every((k) => HORIZON_EVENTS.has(k))) {
+    throw new Error('HORIZON_EVENTS disagrees with LADDER: ' + structural.join(','));
+  }
+}
+
 const BODY_ID = { sun: SUN, moon: MOON };
 
 // One second in Julian days, and the nudge used to step past a solved event so
 // the next search does not re-find the same one.
 const SEC = 1.0 / 86400.0;
 const NUDGE = 2.0 * SEC;
+
+/* Two occurrences of the same event inside one local day are always close to 24
+ * hours apart - the tightest pair measured over a year at seven sites is
+ * 23h45m. So two times closer together than this are the same crossing reached
+ * two different ways, never two events. */
+const SAME_EVENT_S = 600.0;
+
+/* How far back swe_rise_trans has to be re-seeded before it will return an event
+ * it stepped over. Measured at Reykjavik on 2026-06-30: the sunset was 1.8 s
+ * past the search start, and seeding 5 s, 30 s, 120 s or 600 s earlier all
+ * skipped it and returned the following day's. Seeding 30 minutes earlier found
+ * it. The ladder runs out to six hours for margin. */
+const RESEED_BACKOFF_S = [1800.0, 5400.0, 10800.0, 21600.0];
 
 /* ------------------------------------------------------------ time plumbing */
 
@@ -367,14 +437,26 @@ function clearErr(eng) {
  * Mirrors solar.py's _solve_one, including its error contract: a hard failure
  * (Swiss ERR) becomes an err string, while "no event" (-2) is a quiet null
  * that the altitude track is left to explain.
+ *
+ * `horhgt` is the height of the local horizon in degrees, negative when it is
+ * depressed below level. It is the dip for the four HORIZON_EVENTS and zero for
+ * everything else. At zero the call routes through swe_rise_trans, which is
+ * what a sea-level observer got before the dip existed and is preserved
+ * exactly: the two entry points agree to under 8 ms - solver convergence noise,
+ * measured - and there is no reason to spend even that on a no-op.
  */
-function solveOne(eng, jdStart, ipl, mode, rsmiOrAlt, direction) {
+function solveOne(eng, jdStart, ipl, mode, rsmiOrAlt, direction, horhgt) {
   clearErr(eng);
+  const hor = horhgt || 0.0;
   let ret;
   if (mode === 'rsmi') {
-    ret = eng.M.ccall('swe_rise_trans', 'number', SIG_RT,
-      [jdStart, ipl, 0 /* starname NULL */, FLG_SWIEPH, rsmiOrAlt,
-        eng.geoPtr, 0.0, 0.0, eng.tretPtr, eng.serrPtr]);
+    ret = hor === 0.0
+      ? eng.M.ccall('swe_rise_trans', 'number', SIG_RT,
+        [jdStart, ipl, 0 /* starname NULL */, FLG_SWIEPH, rsmiOrAlt,
+          eng.geoPtr, 0.0, 0.0, eng.tretPtr, eng.serrPtr])
+      : eng.M.ccall('swe_rise_trans_true_hor', 'number', SIG_RT_HOR,
+        [jdStart, ipl, 0, FLG_SWIEPH, rsmiOrAlt,
+          eng.geoPtr, 0.0, 0.0, hor, eng.tretPtr, eng.serrPtr]);
   } else {
     const rsmi = (direction === RISE ? CALC_RISE : CALC_SET) | BIT_DISC_CENTER | BIT_NO_REFRACTION;
     ret = eng.M.ccall('swe_rise_trans_true_hor', 'number', SIG_RT_HOR,
@@ -410,9 +492,11 @@ function phenoTopo(eng, jd, ipl, lon, lat, altM) {
  * threshold, the crossing is found here by bisection rather than lost.
  */
 function makeTrack(eng, body, geo, jd0, jd1) {
-  const STEP_MIN = 2.0;
+  const STEP_MIN = 2.0;      // altitude sampling step in minutes
+  const SD_STEP_MIN = 30.0;  // semidiameter sampling step in minutes
   const ipl = BODY_ID[body];
   const [lon, lat, altM] = geo;
+  const horhgt = -horizonDipDeg(altM);
 
   /** Geometric (unrefracted) topocentric altitude of the body's centre. */
   function altitude(jd) {
@@ -435,48 +519,93 @@ function makeTrack(eng, body, geo, jd0, jd1) {
     return phenoTopo(eng, jd, ipl, lon, lat, altM).diamDeg / 2.0;
   }
 
-  let refr = null;
+  /**
+   * Semidiameter by interpolation on a half-hourly grid.
+   *
+   * The apparent size of the disc is the slowest-moving quantity in the whole
+   * calculation, and asking Swiss for it at all 721 altitude samples costs more
+   * than every other ephemeris call in the engine combined. Sampled every 30
+   * minutes and interpolated linearly it is good to about 0.06 arcsec for the
+   * Moon and a thousandth of that for the Sun, against a horizon whose two
+   * competing definitions differ by 153 arcsec.
+   *
+   * Outside the sampled span it falls through to the exact call: the threshold
+   * calibration reaches up to 24 days away from the window.
+   */
+  const sdStep = SD_STEP_MIN / 1440.0;
+  const sdN = Math.max(2, Math.trunc((jd1 - jd0) / sdStep) + 2);
+  const sdGrid = new Array(sdN).fill(null);
+  function sd(jd) {
+    const i = Math.trunc((jd - jd0) / sdStep);
+    if (i < 0 || i + 1 >= sdN) return semidiameter(jd);
+    for (const k of [i, i + 1]) {
+      if (sdGrid[k] === null) sdGrid[k] = semidiameter(jd0 + k * sdStep);
+    }
+    const f = (jd - jd0) / sdStep - i;
+    return sdGrid[i] + f * (sdGrid[i + 1] - sdGrid[i]);
+  }
+
+  let drop = null;
 
   /**
-   * The refraction component of Swiss's OWN rise/set threshold, here.
+   * How far below level Swiss puts rise and set here, in degrees.
    *
-   * Calibrated rather than assumed. swe_rise_trans places rise and set at a
-   * centre altitude of minus (refraction plus semidiameter); the semidiameter
-   * is knowable, but the refraction depends on the observer's altitude through
-   * an internal pressure model that the public refraction API does not
-   * reproduce. So ask Swiss for a rise or set it CAN solve near this day,
+   * Two effects in one number: the refraction Swiss applies, and the dip of the
+   * visible horizon this observer's elevation buys them.
+   *
+   * Calibrated rather than assumed, and calibrated through THE SAME CALL the
+   * primary solver makes - same horhgt, same flags. Swiss places rise and set at
+   * a centre altitude of minus (depression plus semidiameter); the semidiameter
+   * is knowable, so ask Swiss for a rise or set it CAN solve near this day,
    * measure the geometric centre altitude it chose, and subtract the
-   * semidiameter. What is left is the refraction Swiss is using at this site.
+   * semidiameter. What is left is the depression Swiss is working to.
+   *
+   * Assembling it from parts instead would be wrong, not merely inelegant.
+   * Refraction is not a constant the dip is added to: Swiss evaluates it at the
+   * DEPRESSED altitude, where the sight-line runs further through the low air,
+   * so it grows as the horizon falls. Measured at 33.9772 N, 118.4489 W: the
+   * depression is 0.612 deg at sea level and 2.396 deg at 3000 m, where dip plus
+   * the sea-level refraction would predict only 1.607 + 0.612 = 2.219. The
+   * missing 0.18 deg is real refraction, worth some 40 seconds at the horizon's
+   * rate of climb.
    *
    * This is what keeps the fallback solver definitionally identical to the
-   * primary one. Without it the two disagree by 10 to 60 seconds, and a
-   * rescued sunset sits visibly out of line with the days either side of it.
+   * primary one. Without it the two disagree by 10 to 60 seconds, and a rescued
+   * sunset sits visibly out of line with the days either side of it.
    */
-  function refraction() {
-    if (refr !== null) return refr;
+  function horizonDepression() {
+    if (drop !== null) return drop;
     const mid = 0.5 * (jd0 + jd1) - 0.5;
     const offsets = [0.0];
     for (let k = 1; k < 25; k++) { offsets.push(-k); offsets.push(k); }
     for (const offset of offsets) {
       for (const flag of [CALC_RISE, CALC_SET]) {
         setGeo(eng, lon, lat, altM);
-        const r = solveOne(eng, mid + offset, ipl, 'rsmi', flag, null);
+        const r = solveOne(eng, mid + offset, ipl, 'rsmi', flag, null, horhgt);
         if (r.err !== null || r.jd === null) continue;
-        refr = -altitude(r.jd) - semidiameter(r.jd);
-        return refr;
+        drop = -altitude(r.jd) - sd(r.jd);
+        return drop;
       }
     }
     // Deep polar day or night: no rise or set within 24 days to calibrate
     // against. The body is degrees clear of the horizon, so the sea-level
-    // constant is far more precision than the classification needs.
-    refr = DEFAULT_HORIZON_REFRACTION;
-    return refr;
+    // constant plus the dip is far more precision than the classification
+    // needs. It is a floor on the true depression, never an overshoot.
+    drop = DEFAULT_HORIZON_REFRACTION - horhgt;
+    return drop;
   }
 
-  /** Threshold altitude at jd. Fixed for twilight, live for rise/set. */
+  /**
+   * Threshold altitude at jd. Fixed for twilight, live for rise/set.
+   *
+   * `thr === null` reaches here only for the four HORIZON_EVENTS - the twilight
+   * and golden-hour rows all carry a fixed angle, and transits never consult the
+   * track - so the dip inside the depression is scoped to exactly the events
+   * entitled to it.
+   */
   function threshold(jd, thr) {
     if (thr !== null) return thr;
-    return -(refraction() + semidiameter(jd));
+    return -(horizonDepression() + sd(jd));
   }
 
   const f = (jd, thr) => altitude(jd) - threshold(jd, thr);
@@ -533,6 +662,25 @@ function makeTrack(eng, body, geo, jd0, jd1) {
 /* ---------------------------------------------------------------- the solve */
 
 /**
+ * Ask Swiss again for an event it stepped over, seeding further back.
+ *
+ * Returns Swiss's own instant for the crossing at `target`, or null if no
+ * backoff produces it. Swiss is the oracle, so where it CAN be made to answer
+ * its answer is preferred to the altitude track's; the track is only there to
+ * prove the event exists and to say roughly when.
+ */
+function reseed(eng, target, ipl, mode, rsmiOrAlt, direction, jd0, jd1, horhgt) {
+  for (const back of RESEED_BACKOFF_S) {
+    const r = solveOne(eng, target - back * SEC, ipl, mode, rsmiOrAlt, direction, horhgt);
+    if (r.err !== null || r.jd === null) continue;
+    if (Math.abs(r.jd - target) * 86400.0 <= SAME_EVENT_S && r.jd >= jd0 && r.jd < jd1) {
+      return r.jd;
+    }
+  }
+  return null;
+}
+
+/**
  * All occurrences of one event inside [jd0, jd1). Returns [jds, status].
  *
  * Walks the whole window rather than asking Swiss for "the next event after
@@ -541,16 +689,32 @@ function makeTrack(eng, body, geo, jd0, jd1) {
  * day was never looked for, an event outside the window vanished instead of
  * being reported absent, and a -2 return was called "circumpolar" even when the
  * Sun plainly rose and only a twilight threshold went unreached.
+ *
+ * Then it RECONCILES what Swiss returned against the measured altitude of the
+ * body, UNCONDITIONALLY, and that is the point. swe_rise_trans steps over an
+ * event that sits a few seconds past its search start: at Reykjavik on
+ * 2026-06-30 the local day opens with a sunset 2.8 s after midnight, and Swiss
+ * skips it and returns the day's OTHER sunset instead. Consulting the track only
+ * when Swiss came back EMPTY misses exactly that case, because Swiss did not
+ * come back empty - it came back one short, which looks identical to a normal
+ * day from the outside. This engine used to make that mistake and drop the
+ * sunset; solar.py did not, and the two disagreed by a whole event.
  */
-function solveWindow(eng, spec, jd0, jd1, trackFor) {
-  const [, , body, direction, mode, rsmiOrAlt, thr] = spec;
+function solveWindow(eng, spec, jd0, jd1, geo, trackFor) {
+  const [key, , body, direction, mode, rsmiOrAlt, thr] = spec;
   const ipl = BODY_ID[body];
+  const [lon, lat, altM] = geo;
+
+  // The visible horizon drops away beneath an elevated observer. Only the four
+  // HORIZON_EVENTS are defined against it; everything else is defined against
+  // level and gets horhgt 0.
+  const horhgt = HORIZON_EVENTS.has(key) ? -horizonDipDeg(altM) : 0.0;
 
   const jds = [];
   let cursor = jd0 - SEC;   // a hair early, so an event exactly at the boundary
   let err = null;           // instant is not stepped over
   for (let i = 0; i < 8; i++) {   // a 25-hour day holds at most two of anything
-    const r = solveOne(eng, cursor, ipl, mode, rsmiOrAlt, direction);
+    const r = solveOne(eng, cursor, ipl, mode, rsmiOrAlt, direction, horhgt);
     err = r.err;
     if (err !== null || r.jd === null) break;
     if (r.jd >= jd1) break;
@@ -560,18 +724,26 @@ function solveWindow(eng, spec, jd0, jd1, trackFor) {
   }
 
   if (err !== null) return [[], 'error: ' + err];
-  if (jds.length) return [jds, 'ok'];
 
-  // Nothing from Swiss. Measure the day before saying anything about it.
   if (direction === TRANSIT_UP || direction === TRANSIT_DOWN) {
-    // A transit always exists; the only honest empty answer is that none of
-    // them landed in this local day.
-    return [[], 'none_today'];
+    // A transit has no threshold, so there is nothing to measure against and
+    // nothing for Swiss to graze past. It always exists; the only honest empty
+    // answer is that none of them landed in this local day.
+    return jds.length ? [jds, 'ok'] : [[], 'none_today'];
   }
 
+  // Measure the sky, every time, and adopt any crossing Swiss did not report.
   const track = trackFor(body);
-  const fallback = track.crossings(thr, direction);
-  if (fallback.length) return [fallback, 'ok'];   // the sky outranks the solver
+  for (const crossing of track.crossings(thr, direction)) {
+    if (jds.some((j) => Math.abs(crossing - j) * 86400.0 <= SAME_EVENT_S)) continue;
+    setGeo(eng, lon, lat, altM);   // the track moved Swiss's topocentric observer
+    const recovered = reseed(eng, crossing, ipl, mode, rsmiOrAlt, direction,
+      jd0, jd1, horhgt);
+    jds.push(recovered !== null ? recovered : crossing);
+  }
+  jds.sort((a, b) => a - b);
+
+  if (jds.length) return [jds, 'ok'];
 
   const [lo, hi] = track.extrema(thr);
   if (lo > 0.0) return [[], 'always_above'];
@@ -588,16 +760,22 @@ function solveWindow(eng, spec, jd0, jd1, trackFor) {
  * rises at 01:29 and does not set until 00:06 the next morning, and 22h37m is
  * the honest answer for how long that day was. Polar day returns the full
  * length of the local day, polar night returns 0. Both are measured facts.
+ *
+ * Sunrise and sunset are HORIZON_EVENTS, so the pair solved here carries the
+ * same dip the ladder rows carry. Without that the printed day length would
+ * contradict the printed sunrise and sunset by up to a quarter of an hour on a
+ * mountain.
  */
-function dayLength(eng, times, statuses, jd0, jd1) {
+function dayLength(eng, times, statuses, jd0, jd1, altM) {
   const windowS = pyRound((jd1 - jd0) * 86400.0);
   if (statuses.sunrise === 'always_above') return windowS;
   if (statuses.sunrise === 'always_below') return 0;
 
+  const horhgt = -horizonDipDeg(altM);
   const rises = times.sunrise || [], sets = times.sunset || [];
   if (rises.length) {
     const sr = rises[0];
-    const r = solveOne(eng, sr + NUDGE, SUN, 'rsmi', CALC_SET, SET);
+    const r = solveOne(eng, sr + NUDGE, SUN, 'rsmi', CALC_SET, SET, horhgt);
     if (r.jd !== null) return pyRound((r.jd - sr) * 86400.0);
     return null;
   }
@@ -606,7 +784,7 @@ function dayLength(eng, times, statuses, jd0, jd1) {
     // Walk forward from 36 hours back and keep the last sunrise before it.
     let cursor = ss - 1.5, best = null;
     for (let i = 0; i < 4; i++) {
-      const r = solveOne(eng, cursor, SUN, 'rsmi', CALC_RISE, RISE);
+      const r = solveOne(eng, cursor, SUN, 'rsmi', CALC_RISE, RISE, horhgt);
       if (r.jd === null || r.jd >= ss) break;
       best = r.jd;
       cursor = r.jd + NUDGE;
@@ -654,7 +832,7 @@ function dayEvents(eng, lat, lon, altM, dateStr, tz, wantMoon) {
     // Swiss's rise/set internals set the topocentric observer; re-assert ours
     // in case an altitude track moved it.
     setGeo(eng, lon, lat, altM);
-    const [jds, status] = solveWindow(eng, spec, jd0, jd1, trackFor);
+    const [jds, status] = solveWindow(eng, spec, jd0, jd1, geo, trackFor);
     statuses[key] = status;
     times[key] = jds;
     if (!jds.length) {
@@ -678,7 +856,7 @@ function dayEvents(eng, lat, lon, altM, dateStr, tz, wantMoon) {
   });
 
   setGeo(eng, lon, lat, altM);
-  const dayLen = dayLength(eng, times, statuses, jd0, jd1);
+  const dayLen = dayLength(eng, times, statuses, jd0, jd1, altM);
 
   // Sampled at the midpoint of the local day - a stable daily instant that
   // survives DST shifts - and topocentric, because the contract carries an

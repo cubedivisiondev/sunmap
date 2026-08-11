@@ -39,6 +39,47 @@ occurrence LIST is reconciled against the body's measured altitude, on every
 day, not only on the days Swiss comes back empty. See _solve_window.
 
 
+THE HORIZON AND YOUR ELEVATION
+------------------------------
+Stand on a mountain and the horizon falls away below you, so the Sun clears it
+EARLIER than it would at the shore. That drop is the dip of the horizon, and it
+is the dominant effect of elevation on a sunrise: about 0.29 degrees at 101 m,
+1.61 degrees at 3000 m.
+
+Swiss does not model it. The observer altitude in `geopos` feeds an internal air
+PRESSURE model - thinner air, less refraction - and nothing else. That effect is
+real but tiny, and it points the OTHER WAY: measured at 33.9772 N, 118.4489 W
+for the 2026-08-12 sunrise, altitude alone moves the event +2.4 s at 101 m,
++23.0 s at 1000 m and +62.6 s at 3000 m. LATER as you climb. The dip moves the
+same sunrise -103.2 s, -321.5 s and -547.3 s. Opposite sign, roughly nine times
+the size.
+
+So the dip is supplied explicitly, as `horhgt = -dip` through
+swe_rise_trans_true_hor, and Swiss's pressure effect rides on top of it
+untouched. Nothing is counted twice: the dip enters once, as the height of the
+local horizon, and the refraction Swiss applies is its own - evaluated at the
+DEPRESSED altitude, which is why the total horizon depression at 3000 m
+(2.396 degrees, measured) is more than the dip plus the sea-level refraction
+(1.607 + 0.612 = 2.219). That is a physically correct 0.18 degrees of extra
+refraction from looking further down through the air, and it is why the
+threshold used by the fallback solver is CALIBRATED from the same call rather
+than assembled from parts. See _AltitudeTrack._horizon_depression.
+
+The dip applies ONLY to the four events defined by the visible horizon -
+sunrise, sunset, moonrise, moonset - listed in HORIZON_EVENTS. It does NOT
+apply to transits, which have no horizon in their definition, and it does NOT
+apply to the twilight or golden-hour bands, which are defined on the Sun's
+CENTRE altitude measured from level, not from whatever horizon the observer can
+see. Swiss agrees: passing a non-zero horhgt alongside a twilight bit moves the
+answer by 0.000000 s, measured, because swe_rise_trans_true_hor zeroes horhgt
+for twilight itself.
+
+What the dip assumes is a clear horizon at sea level, all the way round. A ridge
+to the east delays sunrise by an amount no ephemeris can know, and an observer
+1000 m up on a plateau whose land runs level to the horizon has no dip at all.
+This is the honest model, not the whole truth, and the UI says so.
+
+
 STATUS VOCABULARY
 -----------------
   ok             The event occurred at the reported instant.
@@ -62,6 +103,7 @@ altitude across the day, not by trusting a solver return code.
 """
 import argparse
 import json
+import math
 from datetime import datetime, time as _time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -81,11 +123,13 @@ FLAGS = swe.FLG_SWIEPH
 # them to better than 0.1 arcsec, measured.
 #
 # Rise and set are not a constant. The threshold is minus the sum of the
-# body's semidiameter and the refraction at the horizon, the semidiameter
-# moves with distance, and the refraction swe_rise_trans applies depends on
-# the observer's altitude through an internal pressure model that the public
-# refraction API does not expose. So RISE_SET is a sentinel: the threshold is
-# calibrated from Swiss itself per site. See _AltitudeTrack._refraction.
+# body's semidiameter and the depression of the horizon, the semidiameter moves
+# with distance, and the depression is two things at once: the refraction
+# swe_rise_trans applies, which depends on the observer's altitude through an
+# internal pressure model the public refraction API does not expose, plus the
+# dip this observer's elevation buys them. So RISE_SET is a sentinel: the
+# threshold is calibrated from Swiss itself per site, through the same call the
+# primary solver makes. See _AltitudeTrack._horizon_depression.
 RISE_SET = None
 ALT_CIVIL = -6.0
 ALT_NAUTICAL = -12.0
@@ -99,6 +143,31 @@ GOLDEN_HIGH = 6.0
 # day or night where the nearest rise or set is weeks away and the body is
 # degrees clear of the horizon anyway.
 DEFAULT_HORIZON_REFRACTION = 36.739 / 60.0
+
+# The dip of the horizon, in arcminutes per square root of a metre of observer
+# height. 1.76 is the standard nautical value: it already carries the standard
+# terrestrial refraction along the long, low sight-line to the sea horizon,
+# which bends it back up a little. The purely geometric drop, ignoring air, is
+# 1.93 arcmin - arccos(R / (R + h)) with R the Earth's radius.
+#
+# Corroborated against Swiss's own dip, which it computes but does not apply to
+# rise and set: swe_refrac_extended returns -0.3224, -1.0145 and -1.7570 degrees
+# at 101, 1000 and 3000 m, against -0.2948, -0.9276 and -1.6067 here. Same sign,
+# same size, differing only in the atmospheric model. The nautical constant is
+# the one used, because it is the one that can be stated in a line and checked
+# by hand.
+DIP_ARCMIN_PER_SQRT_METRE = 1.76
+
+
+def horizon_dip_deg(alt_m):
+    """Degrees the visible horizon drops below level, for an observer alt_m up.
+
+    Zero at and below sea level. A negative geodetic altitude is not a pit with
+    a raised horizon - Death Valley and the Dead Sea shore both see a horizon at
+    their own level - so the dip floors at zero rather than going imaginary.
+    """
+    return DIP_ARCMIN_PER_SQRT_METRE * math.sqrt(max(float(alt_m), 0.0)) / 60.0
+
 
 RISE, SET, TRANSIT_UP, TRANSIT_DOWN = "rise", "set", "transit_up", "transit_down"
 
@@ -128,6 +197,17 @@ LADDER = [
 ]
 
 LADDER_INDEX = {row[0]: i for i, row in enumerate(LADDER)}
+
+# The four events defined by the VISIBLE horizon, and the only ones the dip
+# touches. Everything else in the ladder is defined against LEVEL: a transit has
+# no horizon in it at all, and the twilight and golden-hour bands are angles of
+# the Sun's centre below or above level, unchanged by how far the observer can
+# see. Named explicitly rather than inferred, so that adding a ladder row can
+# never silently opt it in or out.
+HORIZON_EVENTS = frozenset(("sunrise", "sunset", "moonrise", "moonset"))
+assert HORIZON_EVENTS == {r[0] for r in LADDER
+                          if r[4] == "rsmi" and r[6] is None
+                          and r[3] in (RISE, SET)}
 
 BODY_ID = {"sun": swe.SUN, "moon": swe.MOON}
 
@@ -225,7 +305,8 @@ class _AltitudeTrack:
         self.grid = [jd0 + (jd1 - jd0) * i / (n - 1) for i in range(n)]
         self.alt = [self.altitude(j) for j in self.grid]
         self._grid_cache = {}
-        self._refr = None
+        self._drop = None
+        self.horhgt = -horizon_dip_deg(geo[2])
         self._sd_step = self.SD_STEP_MIN / 1440.0
         self._sd_n = max(2, int((jd1 - jd0) / self._sd_step) + 2)
         self._sd_grid = [None] * self._sd_n
@@ -267,51 +348,66 @@ class _AltitudeTrack:
         frac = (jd - self.jd0) / self._sd_step - i
         return self._sd_grid[i] + frac * (self._sd_grid[i + 1] - self._sd_grid[i])
 
-    def _refraction(self):
-        """The refraction component of Swiss's OWN rise/set threshold, here.
+    def _horizon_depression(self):
+        """How far below level Swiss puts rise and set here, in degrees.
 
-        Calibrated rather than assumed. swe_rise_trans places rise and set at a
-        centre altitude of minus (refraction plus semidiameter); the
-        semidiameter is knowable, but the refraction depends on the observer's
-        altitude through an internal pressure model that the public refraction
-        API does not reproduce. So ask Swiss for a rise or set it CAN solve
+        Two effects in one number: the refraction Swiss applies, and the dip of
+        the visible horizon this observer's elevation buys them.
+
+        Calibrated rather than assumed, and calibrated through THE SAME CALL the
+        primary solver makes - same horhgt, same flags. Swiss places rise and
+        set at a centre altitude of minus (depression plus semidiameter); the
+        semidiameter is knowable, so ask Swiss for a rise or set it CAN solve
         near this day, measure the geometric centre altitude it chose, and
-        subtract the semidiameter. What is left is the refraction Swiss is
-        using at this site.
+        subtract the semidiameter. What is left is the depression Swiss is
+        working to.
+
+        Assembling it from parts instead would be wrong, not merely inelegant.
+        Refraction is not a constant that the dip is added to: Swiss evaluates
+        it at the DEPRESSED altitude, where the sight-line runs further through
+        the low air, so it grows as the horizon falls. Measured at 33.9772 N,
+        118.4489 W: the depression is 0.612 deg at sea level and 2.396 deg at
+        3000 m, where dip plus the sea-level refraction would predict only
+        1.607 + 0.612 = 2.219. The missing 0.18 deg is real refraction, and at
+        the horizon's rate of climb it is worth some 40 seconds.
 
         This is what keeps the fallback solver definitionally identical to the
         primary one. Without it the two disagree by 10 to 30 seconds, and a
         rescued sunset would sit visibly out of line with the sunsets on the
         days either side of it.
         """
-        if self._refr is not None:
-            return self._refr
+        if self._drop is not None:
+            return self._drop
         mid = 0.5 * (self.jd0 + self.jd1) - 0.5
         offsets = [0.0] + [s * k for k in range(1, 25) for s in (-1.0, 1.0)]
         for offset in offsets:
             for flag in (swe.CALC_RISE, swe.CALC_SET):
-                try:
-                    res, tret = swe.rise_trans(mid + offset, self.ipl, flag,
-                                               self.geo, 0.0, 0.0, FLAGS)
-                except Exception:  # noqa: BLE001
-                    continue
-                if res != 0:
+                jd, _ret, err = _solve_one(mid + offset, self.ipl, "rsmi", flag,
+                                           None, self.geo, self.horhgt)
+                if err is not None or jd is None:
                     continue
                 # Measured with the same semidiameter function the threshold
                 # uses, so calibration and use cannot drift apart.
-                self._refr = -self.altitude(tret[0]) - self._sd(tret[0])
-                return self._refr
+                self._drop = -self.altitude(jd) - self._sd(jd)
+                return self._drop
         # Deep polar day or night: no rise or set within 24 days to calibrate
         # against. The body is degrees clear of the horizon, so the sea-level
-        # constant is far more precision than the classification needs.
-        self._refr = DEFAULT_HORIZON_REFRACTION
-        return self._refr
+        # constant plus the dip is far more precision than the classification
+        # needs. It is a floor on the true depression, never an overshoot.
+        self._drop = DEFAULT_HORIZON_REFRACTION - self.horhgt
+        return self._drop
 
     def threshold(self, jd, thr):
-        """Threshold altitude at `jd`. Fixed for twilight, live for rise/set."""
+        """Threshold altitude at `jd`. Fixed for twilight, live for rise/set.
+
+        `thr is None` reaches here only for the four HORIZON_EVENTS - the
+        twilight and golden-hour rows all carry a fixed angle, and transits
+        never consult the track - so the dip inside the depression is scoped to
+        exactly the events entitled to it.
+        """
         if thr is not None:
             return thr
-        return -(self._refraction() + self._sd(jd))
+        return -(self._horizon_depression() + self._sd(jd))
 
     def f(self, jd, thr):
         return self.altitude(jd) - self.threshold(jd, thr)
@@ -360,11 +456,24 @@ class _AltitudeTrack:
 # Swiss solves
 # ---------------------------------------------------------------------------
 
-def _solve_one(jd_start, ipl, mode, rsmi_or_alt, direction, geo):
-    """One Swiss rise/set/transit solve. Returns (jd|None, ret_code, err)."""
+def _solve_one(jd_start, ipl, mode, rsmi_or_alt, direction, geo, horhgt=0.0):
+    """One Swiss rise/set/transit solve. Returns (jd|None, ret_code, err).
+
+    `horhgt` is the height of the local horizon in degrees, negative when it is
+    depressed below level. It is the dip for the four HORIZON_EVENTS and zero
+    for everything else. At zero the call routes through swe_rise_trans, which
+    is what a sea-level observer got before the dip existed and is preserved
+    exactly: the two entry points agree to under 8 ms - solver convergence
+    noise, measured - and there is no reason to spend even that on a no-op.
+    """
     try:
         if mode == "rsmi":
-            res, tret = swe.rise_trans(jd_start, ipl, rsmi_or_alt, geo, 0.0, 0.0, FLAGS)
+            if horhgt == 0.0:
+                res, tret = swe.rise_trans(jd_start, ipl, rsmi_or_alt, geo,
+                                           0.0, 0.0, FLAGS)
+            else:
+                res, tret = swe.rise_trans_true_hor(jd_start, ipl, rsmi_or_alt, geo,
+                                                    0.0, 0.0, horhgt, FLAGS)
         else:
             rsmi = ((swe.CALC_RISE if direction == RISE else swe.CALC_SET)
                     | swe.BIT_DISC_CENTER | swe.BIT_NO_REFRACTION)
@@ -377,7 +486,7 @@ def _solve_one(jd_start, ipl, mode, rsmi_or_alt, direction, geo):
     return tret[0], 0, None
 
 
-def _reseed(target, ipl, mode, rsmi_or_alt, direction, geo, jd0, jd1):
+def _reseed(target, ipl, mode, rsmi_or_alt, direction, geo, jd0, jd1, horhgt=0.0):
     """Ask Swiss again for an event it stepped over, seeding further back.
 
     Returns Swiss's own instant for the crossing at `target`, or None if no
@@ -387,7 +496,7 @@ def _reseed(target, ipl, mode, rsmi_or_alt, direction, geo, jd0, jd1):
     """
     for back in _RESEED_BACKOFF_S:
         jd, _ret, err = _solve_one(target - back * _SEC, ipl, mode,
-                                   rsmi_or_alt, direction, geo)
+                                   rsmi_or_alt, direction, geo, horhgt)
         if err is not None or jd is None:
             continue
         if abs(jd - target) * 86400.0 <= _SAME_EVENT_S and jd0 <= jd < jd1:
@@ -422,13 +531,19 @@ def _solve_window(spec, jd0, jd1, geo, track_for):
     key, _label, body, direction, mode, rsmi_or_alt, thr = spec
     ipl = BODY_ID[body]
 
+    # The visible horizon drops away beneath an elevated observer. Only the four
+    # HORIZON_EVENTS are defined against it; everything else is defined against
+    # level and gets horhgt 0.
+    horhgt = -horizon_dip_deg(geo[2]) if key in HORIZON_EVENTS else 0.0
+
     jds = []
     # A hair early, so an event exactly at the boundary instant is not
     # stepped over.
     cursor = jd0 - _SEC
     err = None
     for _ in range(8):           # a 25-hour day holds at most two of anything
-        jd, _ret, err = _solve_one(cursor, ipl, mode, rsmi_or_alt, direction, geo)
+        jd, _ret, err = _solve_one(cursor, ipl, mode, rsmi_or_alt, direction, geo,
+                                   horhgt)
         if err is not None or jd is None:
             break
         if jd >= jd1:
@@ -454,7 +569,7 @@ def _solve_window(spec, jd0, jd1, geo, track_for):
         if any(abs(crossing - j) * 86400.0 <= _SAME_EVENT_S for j in jds):
             continue
         recovered = _reseed(crossing, ipl, mode, rsmi_or_alt, direction, geo,
-                            jd0, jd1)
+                            jd0, jd1, horhgt)
         jds.append(recovered if recovered is not None else crossing)
     jds.sort()
 
@@ -535,8 +650,14 @@ def _day_length(times, statuses, geo, jd0, jd1):
 
     Polar day returns the full length of the local day, polar night returns 0.
     Both are measured facts, not placeholders.
+
+    Sunrise and sunset are HORIZON_EVENTS, so the pair solved here carries the
+    same dip the ladder rows carry. Without that the printed day length would
+    contradict the printed sunrise and sunset by up to a quarter of an hour on a
+    mountain.
     """
     window_s = round((jd1 - jd0) * 86400.0)
+    horhgt = -horizon_dip_deg(geo[2])
     if statuses.get("sunrise") == "always_above":
         return window_s
     if statuses.get("sunrise") == "always_below":
@@ -546,7 +667,7 @@ def _day_length(times, statuses, geo, jd0, jd1):
     if rises:
         sr = rises[0]
         ss, _ret, _err = _solve_one(sr + _NUDGE, swe.SUN, "rsmi", swe.CALC_SET,
-                                    SET, geo)
+                                    SET, geo, horhgt)
         if ss is not None:
             return round((ss - sr) * 86400.0)
         return None
@@ -556,7 +677,7 @@ def _day_length(times, statuses, geo, jd0, jd1):
         cursor, best = ss - 1.5, None
         for _ in range(4):
             sr, _ret, _err = _solve_one(cursor, swe.SUN, "rsmi", swe.CALC_RISE,
-                                        RISE, geo)
+                                        RISE, geo, horhgt)
             if sr is None or sr >= ss:
                 break
             best, cursor = sr, sr + _NUDGE
