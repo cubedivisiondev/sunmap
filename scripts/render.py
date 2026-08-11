@@ -378,7 +378,7 @@ __JSONLD__
         </defs>
         __SIGIL_BODY__
       </svg>
-      <h2 class="subtitle"><span>Every Sunrise and Sunset</span> <span>Solved Where You Stand</span></h2>
+      <h2 class="subtitle"><span>Every Sunrise and Sunset</span> <span>Mapped to the Millisecond</span></h2>
       <nav class="yearnav" aria-label="Browse days">__YEARNAV__</nav>
     </div>
     <div class="next" id="next">
@@ -452,6 +452,7 @@ function activeKeys(){const s=new Set();
   return s;}
 
 let DATA=null, sel=new Set(), frame='sea', engine='h12', range='all', day=DAY0, tz='__TZ0__', loc=null;
+let NEXTDATA=null;  /* the following day, so the next-event card rolls over instead of dead-ending */
 
 /* Everything below builds DOM with createElement + textContent. Place names come
    from OpenStreetMap and are user-editable; sunmap-geo.js's contract requires
@@ -494,8 +495,23 @@ function save(){try{localStorage.setItem(LS,JSON.stringify({v:2,cats:[...sel],fr
 const worker=new Worker(B+'sunmap-worker.js',{type:'module'});
 worker.onmessage=ev=>{const d=ev.data||{};
   if(!d.ok){$('status').textContent='Could not solve this day: '+(d.error||'the engine did not answer');return;}
-  DATA=d.result;chrome();render();};
+  /* Replies are routed by the date they carry, not by arrival order, so a slow
+     tomorrow can never overwrite today. */
+  if(d.result&&d.result.date===day){DATA=d.result;chrome();render();requestNextDay();}
+  else if(d.result&&d.result.date===addDays(day,1)){NEXTDATA=d.result;tick();}};
 worker.onerror=e=>{$('status').textContent='The engine failed to load: '+((e&&e.message)||'unknown');};
+function addDays(iso,n){const[y,m,d]=iso.split('-').map(Number);
+  const t=new Date(Date.UTC(y,m-1,d));t.setUTCDate(t.getUTCDate()+n);
+  const p=x=>String(x).padStart(2,'0');
+  return t.getUTCFullYear()+'-'+p(t.getUTCMonth()+1)+'-'+p(t.getUTCDate());}
+
+/* The day after the one on screen, solved in the background purely so the
+   next-event card can roll over midnight. It never touches the visible list. */
+function requestNextDay(){
+  if(!loc)return;NEXTDATA=null;
+  worker.postMessage({base:B,coords:{lat:loc.lat,lon:loc.lon,alt:(frame==='ground'?(loc.alt||0):0)},
+    date:addDays(day,1),tz:tz,moon:true});}
+
 function compute(){
   if(!loc)return;
   $('status').textContent='Solving '+dayLabel()+'...';
@@ -560,9 +576,12 @@ function row(e){
   return r;
 }
 
-function shown(){const ak=activeKeys();
-  let arr=(DATA?DATA.events:[]).filter(e=>ak.has(e.key));
+/* Filtering is parameterised by day so the next-event card can look into
+   tomorrow without disturbing the list, which always renders DATA. */
+function shownOf(data){const ak=activeKeys();
+  let arr=(data?data.events:[]).filter(e=>ak.has(e.key));
   if(range==='now'){const now=Date.now();arr=arr.filter(e=>e.utc&&Date.parse(e.utc)>=now);}return arr;}
+function shown(){return shownOf(DATA);}
 function shownSorted(){const ev=shown();ev.sort((a,b)=>{const an=!a.utc,bn=!b.utc;if(an!==bn)return an?1:-1;
   const x=a.utc||'',y=b.utc||'';if(x<y)return -1;if(x>y)return 1;return KEY_ORDER[a.key]-KEY_ORDER[b.key];});return ev;}
 
@@ -812,9 +831,23 @@ function tick(){
   document.querySelectorAll('#list .ev.daymark').forEach(r=>r.classList.remove('daymark'));
   $('next').querySelector('.lbl').textContent='Next event';
   if(!up){
-    $('next-name').textContent='Nothing further on this day';
-    $('next-when').textContent='Step to the next day to keep going';
-    ct.firstChild.textContent='--:--:--';
+    /* Nothing left in the visible selection today, so roll into tomorrow. The
+       card is about what happens next, not about where the calendar page ends. */
+    const nx=NEXTDATA?shownOf(NEXTDATA).filter(e=>e.utc&&Date.parse(e.utc)>now)[0]:null;
+    if(!nx){
+      $('next-name').textContent='Nothing further in this selection';
+      $('next-when').textContent=NEXTDATA?'Turn on more event types, or step to the next day'
+                                         :'Solving tomorrow...';
+      ct.firstChild.textContent='--:--:--';
+      $('count-lbl').textContent='until next';
+      return;}
+    const nm2=clear($('next-name'));
+    nm2.append(el('span','gl',BODYG[nx.body]||''),txt(' '+nx.label));
+    $('next-when').textContent=fmtDate(nx.utc)+' \u00b7 '+fmtClock(nx.utc);
+    let df=Math.max(0,Math.floor((Date.parse(nx.utc)-now)/1000));
+    const dd=Math.floor(df/86400);df-=dd*86400;const hh=Math.floor(df/3600);df-=hh*3600;
+    const mm=Math.floor(df/60),ss=df-mm*60,pd=n=>String(n).padStart(2,'0');
+    ct.firstChild.textContent=(dd>0?dd+'d ':'')+`${pd(hh)}:${pd(mm)}:${pd(ss)}`;
     $('count-lbl').textContent='until next';
     return;}
   const r=document.querySelector('#list .ev[data-k="'+up.key+'"]');if(r)r.classList.add('daymark');
