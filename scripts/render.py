@@ -251,6 +251,26 @@ __JSONLD__
   .chip:hover{color:var(--fg);border-color:var(--faint)}
   .chip[aria-pressed="true"]{background:var(--fg);color:#000;border-color:var(--fg)}
   .chip .x{opacity:.55;margin-left:6px}
+  /* THE EVENT TREE. Two levels and only two: SUN and MOON are the parents, and
+     each owns a row of leaf chips. Twilight and Golden hour are LEAVES OF SUN -
+     subcategories nested inside it, never peers of it. The chips themselves are
+     STARMAP's .seg/.chip verbatim; the box, the parent's tracking and the third
+     state are the only new paint. */
+  .cats{display:flex;flex-direction:column;gap:14px}
+  .cat{display:flex;flex-direction:column;gap:9px;border:1px solid var(--line);border-radius:3px;background:var(--panel);padding:12px}
+  /* The parent's PARTIAL state, carried on four independent channels so it never
+     depends on colour: a diagonal hatch that survives greyscale and high-contrast,
+     a dashed border, the visible "3/6" count, and aria-pressed="mixed" backed by a
+     spelled-out screen-reader clause. */
+  .chip.parent{letter-spacing:.17em;padding:7px 15px}
+  .chip[aria-pressed="mixed"]{color:var(--fg);border-color:var(--fg);border-style:dashed;
+    background:repeating-linear-gradient(135deg,rgba(255,255,255,.26) 0 4px,rgba(0,0,0,.34) 4px 9px)}
+  .chip .cnt{font-size:10.5px;opacity:.72;margin-left:7px;letter-spacing:.08em}
+  /* Every tap rebuilds the panel and re-homes focus, so the ring is the only
+     thing telling a keyboard user where they still are. It has to be visible. */
+  .chip:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+  /* Visually hidden, still read aloud. */
+  .sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
   /* Range / Frame / Engine: evenly spaced columns across the panel */
   .triad{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}
   .col{min-width:0}
@@ -374,7 +394,7 @@ __JSONLD__
 <div class="moonnote"><div class="wrap" id="moonnote">Loading the sky...</div></div>
 
 <nav class="controls"><div class="panel wrap">
-  <div class="section"><div class="slabel">Show events (tap to add or remove)</div><div class="seg" id="cats"></div></div>
+  <div class="section"><div class="slabel">Show events (tap to add or remove)</div><div class="cats" id="cats"></div></div>
   <div class="section"><div class="triad">
     <div class="col"><div class="slabel">Range</div><div class="seg" id="range"></div></div>
     <div class="col"><div class="slabel">Elevation</div><div class="seg" id="frame"></div><div class="note" id="frame-note"></div></div>
@@ -402,7 +422,11 @@ __JSONLD__
 <script type="module">
 import * as GEO from '__B__sunmap-geo.js';
 
-const LS='sunmap.v1';
+/* v2 is the two-level event tree. v1 was the flat four-chip scheme; it is read
+   once to migrate a returning visitor's choice and then left where it is, so a
+   service-worker-cached copy of the OLD page still finds the state it expects
+   instead of a set of leaf ids it has never heard of. */
+const LS='sunmap.v2', LS_V1='sunmap.v1';
 const B='__B__', Y0=__Y0__, Y1=__Y1__;
 const DAY0='__DAY0__';  /* the day this page was prerendered for */
 const BODYG={sun:'☉',moon:'☽'};
@@ -410,9 +434,22 @@ const LADDER=__LADDER__;      /* [[key,label,body],...] - the engine's canonical
 const GLOSS=__GLOSS__;        /* key -> what the instant means */
 const PREC=__PREC__;          /* key -> the geometric definition, derived from the engine ladder */
 const NONE=__NONE__;          /* key -> status -> the honest sentence for a non-event */
-const CATS=__CATS__;          /* [{key,label,keys,def}] */
-CATS.forEach(c=>{const s=new Set(c.keys);c.test=e=>s.has(e.key);});
+const CATS=__CATS__;          /* the two-level tree: [{key,label,kids:[{key,label,keys,hint,def}]}] */
+const MIGRATE=__MIGRATE__;    /* retired v1 chip id -> the v2 leaf ids that replace it */
 const KEY_ORDER={}; LADDER.forEach((r,i)=>{KEY_ORDER[r[0]]=i;});
+
+/* A parent is a bulk switch over its leaves, never a stored value of its own.
+   The ONLY selection state that exists, or persists, is the set of leaf ids -
+   which is why the parent can be derived and can never disagree with its row. */
+const LEAVES=[], LEAF={};
+CATS.forEach(p=>p.kids.forEach(k=>{LEAVES.push(k);LEAF[k.key]=k;}));
+function defaults(){return new Set(LEAVES.filter(k=>k.def).map(k=>k.key));}
+/* off | some | all - the parent's three states, read off its children. */
+function parentOn(p){let n=0;p.kids.forEach(k=>{if(sel.has(k.key))n++;});return n;}
+/* The ladder keys the current selection actually asks for. */
+function activeKeys(){const s=new Set();
+  for(const k of LEAVES)if(sel.has(k.key))for(const key of k.keys)s.add(key);
+  return s;}
 
 let DATA=null, sel=new Set(), frame='sea', engine='h12', range='all', day=DAY0, tz='__TZ0__', loc=null;
 
@@ -421,11 +458,36 @@ let DATA=null, sel=new Set(), frame='sea', engine='h12', range='all', day=DAY0, 
    they never touch innerHTML. Same markup as STARMAP, safer construction. */
 const $=id=>document.getElementById(id);
 function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!=null)n.textContent=text;return n;}
+/* Decoration only. "×" and "3/6" are pictures of the state, and the state is
+   already spelled out in the .sr clause, so they stay out of the name a screen
+   reader reads - otherwise every chip announces itself as "Sun times". */
+function deco(cls,text){const n=el('span',cls,text);n.setAttribute('aria-hidden','true');return n;}
 function clear(n){while(n.firstChild)n.removeChild(n.firstChild);return n;}
 function txt(s){return document.createTextNode(s);}
 
-function load(){try{const s=JSON.parse(localStorage.getItem(LS));if(s){sel=new Set(s.cats||[]);frame=s.frame||'sea';engine=s.engine||'h12';range=s.range||'all';if(sel.size===0)sel=new Set(CATS.filter(c=>c.def).map(c=>c.key));}else{sel=new Set(CATS.filter(c=>c.def).map(c=>c.key));}}catch(e){sel=new Set(CATS.filter(c=>c.def).map(c=>c.key));}}
-function save(){try{localStorage.setItem(LS,JSON.stringify({cats:[...sel],frame,engine,range}));}catch(e){}}
+function read(k){try{return JSON.parse(localStorage.getItem(k));}catch(e){return null;}}
+function dials(s){frame=s.frame||frame;engine=s.engine||engine;range=s.range||range;}
+function load(){
+  const s=read(LS);
+  if(s&&typeof s==='object'){
+    /* Unknown ids are dropped, not trusted - the ladder may have moved under a
+       selection saved by an older build. An empty set is a real choice and is
+       kept: the status line says "0 events", so nothing is silently blank. */
+    sel=new Set((s.cats||[]).filter(k=>LEAF[k]));dials(s);return;
+  }
+  const v1=read(LS_V1);
+  if(v1&&typeof v1==='object'){
+    const had=(v1.cats||[]);
+    sel=new Set();had.forEach(c=>(MIGRATE[c]||[]).forEach(k=>sel.add(k)));
+    dials(v1);
+    /* The old page forced defaults on an empty set, so an empty v1 record means
+       "defaults", not "nothing". Migrate what it MEANT, not what it stored. */
+    if(!had.length||!sel.size)sel=defaults();
+    save();return;
+  }
+  sel=defaults();
+}
+function save(){try{localStorage.setItem(LS,JSON.stringify({v:2,cats:[...sel],frame,engine,range}));}catch(e){}}
 
 /* ---- the engine. Same JSON contract as scripts/solar.py, solved on the device
    so no coordinate ever leaves it. ---- */
@@ -498,7 +560,8 @@ function row(e){
   return r;
 }
 
-function shown(){let arr=(DATA?DATA.events:[]).filter(e=>{for(const k of sel){const c=CATS.find(x=>x.key===k);if(c&&c.test(e))return true;}return false;});
+function shown(){const ak=activeKeys();
+  let arr=(DATA?DATA.events:[]).filter(e=>ak.has(e.key));
   if(range==='now'){const now=Date.now();arr=arr.filter(e=>e.utc&&Date.parse(e.utc)>=now);}return arr;}
 function shownSorted(){const ev=shown();ev.sort((a,b)=>{const an=!a.utc,bn=!b.utc;if(an!==bn)return an?1:-1;
   const x=a.utc||'',y=b.utc||'';if(x<y)return -1;if(x>y)return 1;return KEY_ORDER[a.key]-KEY_ORDER[b.key];});return ev;}
@@ -606,12 +669,50 @@ function dayHash(){
 })();
 
 function buildControls(){
+  /* Every tap rebuilds this whole panel, which would drop keyboard focus on the
+     floor. Remember which chip had it and hand it back at the end. */
+  const a=document.activeElement, refocus=(a&&a.dataset)?a.dataset.chip:null;
+
   const cats=clear($('cats'));
-  CATS.forEach(cat=>{const on=sel.has(cat.key);const b=el('button','chip',null);b.type='button';
-    b.setAttribute('aria-pressed',on);b.append(txt(cat.label));if(on)b.append(el('span','x','×'));
-    b.onclick=()=>{on?sel.delete(cat.key):sel.add(cat.key);save();buildControls();render();};cats.appendChild(b);});
+  CATS.forEach(p=>{
+    const n=p.kids.length, on=parentOn(p), all=(on===n), none=(on===0);
+    const group=el('div','cat'), pid='cat-'+p.key;
+    group.setAttribute('role','group');group.setAttribute('aria-labelledby',pid);
+
+    /* THE PARENT. Tri-state: aria-pressed true / false / mixed, and the state is
+       ALSO spelled out in words for any reader whose support for "mixed" is
+       patchy. The visible "3/6" is aria-hidden so the name reads as a sentence
+       rather than "three slash six". */
+    const head=el('div','seg');
+    const pb=el('button','chip parent',null);pb.type='button';pb.id=pid;pb.dataset.chip=pid;
+    pb.setAttribute('aria-pressed',all?'true':(none?'false':'mixed'));
+    pb.title=all?('Hide every '+p.label.toLowerCase()+' event'):('Show every '+p.label.toLowerCase()+' event');
+    pb.append(txt(p.label),all?deco('x','×'):deco('cnt',on+'/'+n));
+    pb.append(el('span','sr',' - '+(all?('all '+n):none?'no':(on+' of '+n))+' '+p.label.toLowerCase()+' events shown'));
+    /* Mixed and off both resolve upward: one tap turns the whole branch on. */
+    pb.onclick=()=>{p.kids.forEach(k=>all?sel.delete(k.key):sel.add(k.key));
+      save();buildControls();render();};
+    head.appendChild(pb);
+
+    /* THE LEAVES. Twilight and Golden hour sit in this row, inside SUN's box -
+       that nesting is the whole point of the change. */
+    const kids=el('div','seg');
+    p.kids.forEach(k=>{const kon=sel.has(k.key);
+      const b=el('button','chip',null);b.type='button';b.dataset.chip='leaf-'+k.key;
+      b.setAttribute('aria-pressed',kon?'true':'false');
+      if(k.hint)b.title=k.hint;
+      b.append(txt(k.label));
+      if(kon)b.append(deco('x','×'));
+      /* A bundle says how many instants it carries; a single event does not. */
+      if(k.keys.length>1)b.append(el('span','sr',' - '+k.keys.length+' events'));
+      b.onclick=()=>{kon?sel.delete(k.key):sel.add(k.key);save();buildControls();render();};
+      kids.appendChild(b);});
+
+    group.append(head,kids);cats.appendChild(group);
+  });
+
   const seg=(id,opts,cur,set)=>{const host=clear($(id));
-    opts.forEach(([k,l])=>{const b=el('button','chip',l);b.type='button';
+    opts.forEach(([k,l])=>{const b=el('button','chip',l);b.type='button';b.dataset.chip=id+'-'+k;
       b.setAttribute('aria-pressed',k===cur);b.onclick=()=>{set(k);save();buildControls();render();chrome();};host.appendChild(b);});};
   seg('range',[['now','From now'],['all','All day']],range,k=>range=k);
   seg('frame',[['sea','Sea level'],['ground','Your elevation']],frame,k=>{frame=k;compute();});
@@ -629,6 +730,10 @@ function buildControls(){
     :'No elevation known for this point, so both settings agree.';
   $('tz-active').textContent=locLabelTZ();
   initLocationBox();
+
+  /* Hand focus back to the chip that was just operated, so a keyboard user can
+     walk the tree with Tab and Space without being thrown to the top each tap. */
+  if(refocus){const again=document.querySelector('[data-chip="'+refocus+'"]');if(again)again.focus();}
 }
 
 /* ---- THE LOCATION BOX. One input sets the observer AND the timezone. The
@@ -881,21 +986,55 @@ dayHash();
 </script>
 <script>
 (function(){
-  // Beams of light, the SUNMAP field. Structurally the STARMAP particle-mesh
-  // background (same canvas, same count/DPR/resize/mouse/burst plumbing); the
-  // drawing routine is the only difference. Each beam is a long, thin, low-alpha
-  // shaft that drifts across the page and fades in and out on a life cycle, and
-  // the whole field is deliberately near-invisible, exactly as STARMAP's is.
+  // Beams of light, the SUNMAP field - a RADIAL burst that leaves the crest sigil and
+  // expands outward in every direction. Structurally still the STARMAP particle-mesh
+  // background: same canvas, same count/DPR/resize/mouse/__puddyBurst plumbing, and ONE
+  // rAF loop over ONE particle array. Never per-child CSS animation - that is what broke
+  // painting on 2026-08-10. Only the geometry of a beam changed. It used to be a downward
+  // shaft field where every beam shared one angle (light falling from the upper left);
+  // now each beam carries its OWN bearing, the one pointing away from the sun, and its
+  // tail always aims back at the sigil. The field stays near-invisible, as STARMAP's is.
   var c=document.getElementById('stars'); if(!c||!c.getContext) return;
   var ctx=c.getContext('2d'), DPR=Math.min(window.devicePixelRatio||1,2);
   var W=0, H=0, MOBILE=false, parts=[], mouse={x:0,y:0,active:false}, INTENSITY=0.8;
-  var ANG=-Math.PI/3.2;  // the shared shaft direction: light falling from the upper left
+  var OX=0, OY=0, RMAX=1, stale=true;   // the burst origin and its reach - both MEASURED
   // PLUTO sand-300 #ceba9d - the locked PUDDY gold, and the ONLY colour in the field.
   // Held as a channel triplet because every alpha here is computed per frame.
   var BEAM='206,186,157';
+  // prefers-reduced-motion: the burst holds ONE still frame instead of animating, and the
+  // rAF loop is not rescheduled at all, so a reduced-motion visitor burns nothing.
+  var RM=window.matchMedia?window.matchMedia('(prefers-reduced-motion: reduce)'):null;
+  function still(){ return !!(RM&&RM.matches); }
+  function origin(){
+    // The burst starts at the crest sigil's REAL centre, read off the element. #stars is
+    // position:fixed, so getBoundingClientRect's viewport coordinates ARE canvas
+    // coordinates - no scroll arithmetic, and no hardcoded guess that drifts the moment
+    // the h1 wraps, the clamp() type resizes, or the day nav gains a row.
+    var el=document.querySelector('.sigil'), r=el&&el.getBoundingClientRect();
+    if(r&&r.width>0){ OX=r.left+r.width/2; OY=r.top+r.height/2; }
+    else { OX=W/2; OY=H*0.3; }
+    // Reach = the distance to the farthest corner, so the field dissolves at the same
+    // visual rate on any viewport instead of stopping short of an edge on wide screens.
+    RMAX=Math.max(120, Math.sqrt(Math.pow(Math.max(OX,W-OX),2)+Math.pow(Math.max(OY,H-OY),2)));
+    stale=false;
+  }
   function count(){var area=W*H;
     if(MOBILE) return Math.max(8, Math.min(Math.floor(area/60000)*INTENSITY, 16));
     return Math.max(14, Math.min(Math.floor(area/34000)*INTENSITY, 46));}
+  function seed(p, spread){
+    // Born just off the sun on a random bearing and travelling straight out. sp is the
+    // beam's OWN outward speed and vx/vy stay a separate impulse channel, so the mouse
+    // repulsion and __puddyBurst below can shove a beam sideways without ever cancelling
+    // the outward drift. spread=true only at build: it scatters the first generation
+    // across the reach so the field is already full on the first frame (and so the
+    // reduced-motion still frame is a burst, not a knot of stubs at the centre).
+    var a=Math.random()*6.2832, r0=12+Math.random()*(spread?RMAX*0.55:30);
+    p.x=OX+Math.cos(a)*r0; p.y=OY+Math.sin(a)*r0;
+    p.vx=0; p.vy=0; p.sp=0.90+Math.random();
+    p.maxLife=260+Math.random()*210; p.life=spread?Math.random()*p.maxLife:0;
+    p.len=140+Math.random()*200; p.size=Math.random()*1.4+0.6;
+    return p;
+  }
   function build(){
     var w=document.documentElement.clientWidth||window.innerWidth;
     var h=window.innerHeight||document.documentElement.clientHeight;
@@ -903,46 +1042,56 @@ dayHash();
     W=w; H=h; MOBILE=W<768; DPR=MOBILE?1:Math.min(window.devicePixelRatio||1,2);
     c.width=Math.round(W*DPR); c.height=Math.round(H*DPR);
     ctx.setTransform(DPR,0,0,DPR,0,0);
+    origin();                       // re-measure: a resize moves the sigil
     var n=count(); parts=[];
-    for(var i=0;i<n;i++){parts.push({x:Math.random()*W, y:Math.random()*H,
-      vx:(Math.random()-0.5)*0.3, vy:(Math.random()-0.5)*0.3,
-      life:Math.random()*100, maxLife:150+Math.random()*100,
-      len:120+Math.random()*260, size:Math.random()*1.4+0.6});}
+    for(var i=0;i<n;i++) parts.push(seed({},true));
   }
   function paint(){
+    if(stale) origin();             // a scroll moved the sigil under the fixed canvas
     ctx.clearRect(0,0,W,H);
-    var dx=Math.cos(ANG), dy=Math.sin(ANG);
+    var frozen=still();
     for(var k=0;k<parts.length;k++){var p=parts[k];
       if(mouse.active){var ax=mouse.x-p.x, ay=mouse.y-p.y, ad=Math.sqrt(ax*ax+ay*ay);
         if(ad<120){var f=(120-ad)/120; p.vx-=(ax/ad)*f*0.3; p.vy-=(ay/ad)*f*0.3;}}
-      p.x+=p.vx; p.y+=p.vy; p.life++; p.vx*=0.99; p.vy*=0.99;
-      if(p.x<0)p.x=W; if(p.x>W)p.x=0; if(p.y<0)p.y=H; if(p.y>H)p.y=H;
-      var op=Math.sin((p.life/p.maxLife)*Math.PI)*0.30;
-      var x2=p.x+dx*p.len, y2=p.y+dy*p.len;
-      var g=ctx.createLinearGradient(p.x,p.y,x2,y2);
-      // Gold at the source, dissolving to nothing along the shaft. A linear ramp from
-      // op to 0 integrates to the same 0.5*op mean as the centre-peaked ramp it
-      // replaces, so the field carries the SAME total light as before - it just falls
-      // off in one direction instead of two. It stays as near-invisible as STARMAP's.
+      var rx=p.x-OX, ry=p.y-OY, d=Math.sqrt(rx*rx+ry*ry)||1;
+      var ux=rx/d, uy=ry/d;         // this beam's own outward bearing
+      if(!frozen){ p.x+=ux*p.sp+p.vx; p.y+=uy*p.sp+p.vy; p.life++; p.vx*=0.99; p.vy*=0.99; }
+      // Gold at the origin, transparent at the rim - twice over. The whole beam dims with
+      // distance from the sun (fade), and along its own length it is brightest at the
+      // INNER end and gone at the head, so every streak points home. Peak alpha is still
+      // 0.30, the same single-stroke ceiling the shaft field had: nothing in this field is
+      // brighter than anything STARMAP ever drew, it is only arranged differently.
+      var fade=1-Math.min(1,Math.pow(d/RMAX,1.4));
+      var op=Math.sin((p.life/p.maxLife)*Math.PI)*0.30*fade;
+      // The tail never crosses the sun. Capping it at 0.92d makes the near beams short
+      // stubs and the far ones long rays, which is what a burst actually looks like, and
+      // it guarantees every tail converges on the sigil rather than through it.
+      var L=Math.min(p.len, d*0.92), tx=p.x-ux*L, ty=p.y-uy*L;
+      var g=ctx.createLinearGradient(tx,ty,p.x,p.y);
       g.addColorStop(0,'rgba('+BEAM+','+op+')');
       g.addColorStop(1,'rgba('+BEAM+',0)');
       ctx.beginPath(); ctx.strokeStyle=g; ctx.lineWidth=p.size; ctx.lineCap='round';
-      ctx.moveTo(p.x,p.y); ctx.lineTo(x2,y2); ctx.stroke();
-      // The mote riding the shaft - the dust that makes a beam visible at all. It used
-      // to sit at the midpoint because that was the shaft's brightest point; with the
-      // peak moved to the source it rides at t=0.25 instead, and its alpha is the same
-      // 0.8 fraction of the shaft's LOCAL value there (0.8 * op * (1-0.25) = 0.6*op),
-      // so it never becomes a bright dot floating on a dim shaft.
+      ctx.moveTo(tx,ty); ctx.lineTo(p.x,p.y); ctx.stroke();
+      // The mote - the dust that makes a beam visible at all. It rides at t=0.25 from the
+      // bright inner end, carrying 0.8 of the shaft's LOCAL value there (0.8 * op * 0.75 =
+      // 0.6*op), so it never becomes a bright dot floating on a dim shaft.
       ctx.beginPath(); ctx.fillStyle='rgba('+BEAM+','+(op*0.6)+')';
-      ctx.arc(p.x+dx*p.len*0.25, p.y+dy*p.len*0.25, p.size*0.7, 0, 6.2832); ctx.fill();
-      if(p.life>p.maxLife){p.life=0; p.x=Math.random()*W; p.y=Math.random()*H;}
+      ctx.arc(tx+ux*L*0.25, ty+uy*L*0.25, p.size*0.7, 0, 6.2832); ctx.fill();
+      // Recycled AT THE SUN, never wrapped at the edge: a burst has no far side to come
+      // back from, so a spent beam is reborn at the origin and shines out again.
+      if(!frozen && (p.life>p.maxLife || d>RMAX*1.08)) seed(p,false);
     }
   }
-  function frame(){ paint(); requestAnimationFrame(frame); }
+  var raf=0;
+  function frame(){ raf=0; paint(); if(!still()) raf=requestAnimationFrame(frame); }
+  function run(){ if(!raf) raf=requestAnimationFrame(frame); }
   var rt;
-  function schedule(){clearTimeout(rt); rt=setTimeout(build,150);}
+  function schedule(){clearTimeout(rt); rt=setTimeout(function(){build(); paint(); run();},150);}
   if(window.ResizeObserver){try{new ResizeObserver(schedule).observe(document.documentElement);}catch(e){}}
   window.addEventListener('resize', schedule);
+  // The sigil scrolls; the fixed canvas does not. Flag the origin dirty and let the one
+  // rAF loop re-measure at most once a frame - never a getBoundingClientRect per event.
+  window.addEventListener('scroll', function(){ stale=true; if(still()) paint(); }, {passive:true});
   window.addEventListener('mousemove', function(e){mouse.x=e.clientX; mouse.y=e.clientY; mouse.active=true;});
   window.addEventListener('mouseout', function(){mouse.active=false;});
   window.__puddyBurst = function(cx, cy){
@@ -950,8 +1099,12 @@ dayHash();
       var dx=p.x-cx, dy=p.y-cy, d=Math.sqrt(dx*dx+dy*dy)||1;
       var f=Math.min(80, 600/(d*0.1+1));
       p.vx += (dx/d)*f*0.15; p.vy += (dy/d)*f*0.15; }
+    if(still()) paint();
   };
-  build(); paint(); requestAnimationFrame(frame);
+  if(RM){ var onRM=function(){ paint(); run(); };
+    if(RM.addEventListener) RM.addEventListener('change',onRM);
+    else if(RM.addListener) RM.addListener(onRM); }
+  build(); paint(); run();
 })();
 if('serviceWorker' in navigator){
   window.addEventListener('load', function(){
@@ -962,25 +1115,48 @@ if('serviceWorker' in navigator){
 </body>
 </html>"""
 
-# Puddy radiant-sun sigil (per puddy-sigil-methodology-reference.md), built the same way
-# STARMAP's cosmographic mandala is: 21 nodes (Sun at centre + corona ring of 10 + ray-tip
-# ring of 10), every node = the #puddy-face symbol, 3 concentric spheres at the same radii.
-# Sacred-geometry weight in the edges: a decagram {10/3} across the corona, 20 straight
-# radial rays (centre -> corona -> tip), and 10 interleaved short rays on the half-step
-# angles. Min chord 27.2u (corona ring) >= 22 floor.
-# Hate-symbol audit (RULE 15.8): 10-fold, in the sanctioned 5-fold family. NOT 12-fold
-# (no sonnenrad / black sun), NOT 4-fold, no rotation between rings, every arm perfectly
-# straight and radial - no bent, hooked or pinwheel arms - and no outer rim polygon, so
-# the form reads as a radiant sun and never as a spoked wheel. No hexagram.
+# Puddy solar crest (per puddy-sigil-methodology-reference.md), built the same way STARMAP's
+# cosmographic mandala is - generated rings from _ring(), straight generated edges between
+# them, and every node the #puddy-face symbol, copied verbatim and never redrawn. Where
+# STARMAP draws a mandala, SUNMAP draws THE SUN, so the figure is only ever two things:
 #
-# COLOUR. The faces are white on black, exactly as STARMAP's are - the #puddy-face
-# symbol is copied verbatim and is never recoloured. The only other colour in the
-# crest is PLUTO sand-300, the locked PUDDY gold (brand/PLUTO_PALETTE.md), and it
-# is an ACCENT, never a wash: it marks the SOLAR CORE only - the r=30 limb and the
-# ten short rays leaving it. That is 11 hairline strokes out of 51; everything
-# further out (the r=64 and r=92 spheres, the 20 radial rays, the corona decagram)
-# stays #fff, so the crest keeps STARMAP's near-monochrome restraint. Gold at the
-# source is the same rule the beam field follows.
+#   THE DISC.  16 of the 26 faces pack the solar body in three shells - 1 core, 5 at r=23,
+#     10 at r=46 - triangulated core -> A -> B so the interior reads as one SOLID body and
+#     not as dots floating in space. The body faces reach r=53 and a single confident limb
+#     at r=54 closes them in. The 5-then-10 doubling is how a disc packs: a 10-fold shell
+#     at r=23 would put its faces 14.2u apart, under the 22u floor, so the inner shell
+#     takes every other spoke and the packing stays legal at its densest.
+#   THE RAYS.  10 long rays leave the limb at r=58 on the 10 spoke angles and END IN A FACE
+#     at r=86; 10 shorter flares interleave on the half-step angles and stop at r=76.
+#     NOTHING encloses them. A sun's rays end in open space - the instant a rim joins the
+#     tips the figure becomes a wheel - so the r=64 and r=92 spheres of the previous crest
+#     are gone and no stroke exists outside r=54.
+#
+# Min chord 23.0u - core -> shell A, and shell A -> shell B on the aligned spokes, which tie.
+# Next tightest: the A ring at 27.0u, the B ring at 28.4u, the tip ring at 53.2u. Floor is 22u.
+# The previous crest measured 27.2u; this one packs deliberately tighter, because that
+# tightness IS the solid disc the loose 44u corona never was.
+# Hate-symbol audit (RULE 15.8): the figure is D5 - exact 5-fold rotation plus a mirror on
+# the vertical - carried inside a 10-fold spoke set, and 5-fold is the sanctioned family.
+# NOT 4-fold. NOT 12-fold, so no sonnenrad / black sun. Every ring shares the same -pi/2
+# phase, so there is NO rotation between rings: shell A occupies every other spoke, which is
+# a subset of the same phase, not a twist. Every arm is perfectly straight and radial -
+# nothing bent, hooked or pinwheeled. No rim polygon and no circle outside the disc, so the
+# form can only read as a radiant sun, never as a spoked wheel. No hexagram.
+#
+# COLOUR. The faces are white on black, exactly as STARMAP's are - the #puddy-face symbol
+# is never recoloured. The only other colour is PLUTO sand-300, the locked PUDDY gold
+# (brand/PLUTO_PALETTE.md), and it stays an ACCENT, never a wash: 11 strokes out of 43,
+# all of them inside or just outside the body, marking THE PHOTOSPHERE - the r=46 shell
+# circle, which the 10 body faces half-cover so it reads as warm arcs glimpsed between
+# them, and the 10 short flares leaving the limb. Everything structural is white, and the
+# limb itself - the boldest stroke in the crest - is white, because the canon is black and
+# white first. The outer 40% of the crest, the long rays and their tip faces, is pure white.
+# Gold at the source is the same rule the beam field follows.
+#
+# LIGHT BUDGET. Deliberate parity with the crest this replaces: 32 white strokes + 11 gold
+# = 43, exactly the previous count, redistributed from a mandala into a sun. The assert
+# below makes that parity permanent rather than a claim in a comment.
 _GOLD = '#ceba9d'                            # PLUTO sand-300 - LOCKED, never derived
 _CX = _CY = 100.0
 _N = 10
@@ -991,40 +1167,60 @@ def _ring(r, n, off=-math.pi / 2):
              _CY + r * math.sin(off + _i * 2 * math.pi / n)) for _i in range(n)]
 
 
-_corona = _ring(44.0, _N)
-_tips = _ring(86.0, _N)
-_nodes = [(_CX, _CY)] + _corona + _tips      # 0 = centre, 1-10 = corona, 11-20 = tips
+_shellA = _ring(23.0, 5)                     # inner body shell, every other spoke
+_shellB = _ring(46.0, _N)                    # outer body shell, all 10 spokes
+_tips = _ring(86.0, _N)                      # the ray tips, out in open space
+_nodes = [(_CX, _CY)] + _shellA + _shellB + _tips   # 0 core, 1-5 A, 6-15 B, 16-25 tips
 
 
-def _C(i): return 1 + (i % _N)
+def _A(i): return 1 + (i % 5)
 
 
-def _T(i): return 1 + _N + (i % _N)
+def _B(i): return 1 + 5 + (i % _N)
 
 
+def _T(i): return 1 + 5 + _N + (i % _N)
+
+
+# The body weave. Shell-A node i sits on spoke 2i, so B(2i) is its radial neighbour and
+# B(2i-1) / B(2i+1) are its diagonals: three edges per A node triangulates the annulus
+# between the shells, and that triangulation is what makes the disc read solid.
 _edges = []
-_edges += [(0, _C(i)) for i in range(_N)]              # centre -> corona (the inner ray)
-_edges += [(_C(i), _T(i)) for i in range(_N)]          # corona -> tip (the outer ray)
-_edges += [(_C(i), _C(i + 3)) for i in range(_N)]      # corona decagram {10/3}
+_edges += [(0, _A(i)) for i in range(5)]                               # core -> shell A
+_edges += [(_A(i), _B(2 * i)) for i in range(5)]                       # A -> B, radial
+_edges += [(_A(i), _B(2 * i + o)) for i in range(5) for o in (-1, 1)]  # A -> B, diagonals
 _p = []
-for _r in (92.0, 64.0, 30.0):
-    # r=30 is the solar limb, the edge of the disc itself - the one sphere that takes
-    # the gold. The two outer spheres are structure, and structure stays white.
-    _s = _GOLD if _r == 30.0 else '#fff'
-    _p.append(f'<circle cx="100" cy="100" r="{_r:.0f}" fill="none" stroke="{_s}" stroke-width="1" opacity="0.4"/>')
-# the 10 interleaved short rays, on the half-step angles, r=30 -> r=64. These leave the
-# limb, so they carry the gold with them and stop at the middle sphere - the accent is
-# contained inside the inner third of the crest and never reaches the rim.
+# The three spheres, all of them inside or on the disc. r=23 and r=46 run through the two
+# body shells exactly as STARMAP's r=44 sphere runs through its inner ring; r=54 is the
+# LIMB, the edge of the sun itself, and it is the one stroke allowed to be bold.
+_p.append(f'<circle cx="100" cy="100" r="23" fill="none" stroke="#fff" stroke-width="1" opacity="0.4"/>')
+_p.append(f'<circle cx="100" cy="100" r="46" fill="none" stroke="{_GOLD}" stroke-width="1.5" opacity="0.5"/>')
+_p.append(f'<circle cx="100" cy="100" r="54" fill="none" stroke="#fff" stroke-width="2.4" opacity="0.7"/>')
+# The corona. Long white rays on the spokes, r=58 -> r=86, each ending in a face; short gold
+# flares on the half-step angles, r=58 -> r=76. Both start clear of the limb at r=54, so the
+# disc stays a closed body with light leaping off it rather than lines punched through it.
+for _i in range(_N):
+    _a = -math.pi / 2 + _i * 2 * math.pi / _N
+    _p.append('<line x1="{:.2f}" y1="{:.2f}" x2="{:.2f}" y2="{:.2f}" stroke="#fff" stroke-width="2" opacity="0.85" stroke-linecap="round"/>'.format(
+        _CX + 58.0 * math.cos(_a), _CY + 58.0 * math.sin(_a),
+        _CX + 86.0 * math.cos(_a), _CY + 86.0 * math.sin(_a)))
 for _i in range(_N):
     _a = -math.pi / 2 + (_i + 0.5) * 2 * math.pi / _N
-    _p.append('<line x1="{:.2f}" y1="{:.2f}" x2="{:.2f}" y2="{:.2f}" stroke="{}" stroke-width="1.5" opacity="0.55"/>'.format(
-        _CX + 30.0 * math.cos(_a), _CY + 30.0 * math.sin(_a),
-        _CX + 64.0 * math.cos(_a), _CY + 64.0 * math.sin(_a), _GOLD))
+    _p.append('<line x1="{:.2f}" y1="{:.2f}" x2="{:.2f}" y2="{:.2f}" stroke="{}" stroke-width="1.4" opacity="0.45" stroke-linecap="round"/>'.format(
+        _CX + 58.0 * math.cos(_a), _CY + 58.0 * math.sin(_a),
+        _CX + 76.0 * math.cos(_a), _CY + 76.0 * math.sin(_a), _GOLD))
 for _a, _b in _edges:
     _x1, _y1 = _nodes[_a]
     _x2, _y2 = _nodes[_b]
     _p.append(f'<line x1="{_x1:.2f}" y1="{_y1:.2f}" x2="{_x2:.2f}" y2="{_y2:.2f}" stroke="#fff" stroke-width="1.5" opacity="0.8"/>')
-_GEOM = ''.join(_p)                          # the structure alone - spheres, rays, decagram
+# Stroke ledger, asserted rather than asserted-in-prose. 32 white + 11 gold = the 43 strokes
+# the mandala crest carried. If a future edit adds a ray or a sphere, this fails the build
+# instead of quietly turning the accent into a wash.
+_WHITE_STROKES = sum(1 for _s in _p if 'stroke="#fff"' in _s)
+_GOLD_STROKES = sum(1 for _s in _p if f'stroke="{_GOLD}"' in _s)
+assert (_WHITE_STROKES, _GOLD_STROKES) == (32, 11), (
+    'crest stroke budget drifted: %d white + %d gold (want 32 + 11)' % (_WHITE_STROKES, _GOLD_STROKES))
+_GEOM = ''.join(_p)                          # the structure alone - spheres, rays, weave
 for _cx, _cy in _nodes:
     _p.append(f'<use href="#puddy-face" x="{_cx-7:.2f}" y="{_cy-7:.2f}" width="14" height="14"/>')
 _SIGIL = ''.join(_p)
@@ -1146,22 +1342,135 @@ for _spec in _solar.LADDER:
         'none_today': 'None - No crossing of this threshold falls inside this local day.',
     }
 
+# ---------------- THE EVENT TREE ----------------
+# Founder directive: the options split between SUN and MOON, and Twilight and
+# Golden hour are SUBCATEGORIES OF SUN - nested inside it, not peers of it. So
+# the four flat chips become a TWO-LEVEL tree: two parents, ten leaves.
+#
+# A parent holds no state. It is a bulk switch over its own leaves, and its
+# on/partial/off appearance is derived from them at render time, which is why
+# the two can never fall out of step. The leaf ids are the whole persisted
+# selection.
+#
+# A leaf owns one or more ENGINE ladder keys. Twilight owns six and Golden hour
+# owns four; every other leaf owns exactly one. Every ladder key is owned by
+# exactly one leaf - asserted below, and the build dies if that stops being true.
 CATS = [
-    {'key': 'sun', 'label': 'Sun', 'def': True,
-     'keys': ['sunrise', 'sunset', 'solar_noon', 'solar_midnight']},
-    {'key': 'twilight', 'label': 'Twilight', 'def': True,
-     'keys': ['astronomical_dawn', 'nautical_dawn', 'civil_dawn',
-              'civil_dusk', 'nautical_dusk', 'astronomical_dusk']},
-    {'key': 'golden', 'label': 'Golden hour', 'def': True,
-     'keys': ['golden_hour_start_am', 'golden_hour_end_am',
-              'golden_hour_start_pm', 'golden_hour_end_pm']},
-    {'key': 'moon', 'label': 'Moon', 'def': True,
-     'keys': ['moonrise', 'lunar_noon', 'moonset', 'lunar_midnight']},
+    {'key': 'sun', 'label': 'Sun', 'kids': [
+        {'key': 'sunrise',        'label': 'Sunrise',        'def': True, 'keys': ['sunrise']},
+        {'key': 'sunset',         'label': 'Sunset',         'def': True, 'keys': ['sunset']},
+        {'key': 'solar_noon',     'label': 'Solar noon',     'def': True, 'keys': ['solar_noon']},
+        {'key': 'solar_midnight', 'label': 'Solar midnight', 'def': True, 'keys': ['solar_midnight']},
+        {'key': 'twilight',       'label': 'Twilight',       'def': True,
+         'hint': 'Astronomical, nautical and civil - Dawn and dusk',
+         'keys': ['astronomical_dawn', 'nautical_dawn', 'civil_dawn',
+                  'civil_dusk', 'nautical_dusk', 'astronomical_dusk']},
+        {'key': 'golden',         'label': 'Golden hour',    'def': True,
+         'hint': 'The warm low light - Start and end, morning and evening',
+         'keys': ['golden_hour_start_am', 'golden_hour_end_am',
+                  'golden_hour_start_pm', 'golden_hour_end_pm']},
+    ]},
+    {'key': 'moon', 'label': 'Moon', 'kids': [
+        {'key': 'moonrise',       'label': 'Moonrise',       'def': True, 'keys': ['moonrise']},
+        {'key': 'moonset',        'label': 'Moonset',        'def': True, 'keys': ['moonset']},
+        {'key': 'lunar_noon',     'label': 'Lunar noon',     'def': True, 'keys': ['lunar_noon']},
+        {'key': 'lunar_midnight', 'label': 'Lunar midnight', 'def': True, 'keys': ['lunar_midnight']},
+    ]},
 ]
-_covered = {k for c in CATS for k in c['keys']}
-_uncovered = [k for (k, *_r) in _LADDER_JS if k not in _covered]
+
+# The retired flat scheme (localStorage 'sunmap.v1') -> the leaves that replace
+# it. A returning visitor's choice is translated, never dropped: the old single
+# "Sun" chip becomes its four sun leaves, "Moon" becomes its four moon leaves,
+# and Twilight and Golden hour survive as themselves, now nested under SUN.
+MIGRATE = {
+    'sun':      ['sunrise', 'sunset', 'solar_noon', 'solar_midnight'],
+    'twilight': ['twilight'],
+    'golden':   ['golden'],
+    'moon':     ['moonrise', 'moonset', 'lunar_noon', 'lunar_midnight'],
+}
+
+# ---- THE BUILD GATE. Everything below fails the build rather than shipping a
+# control panel that quietly cannot reach part of the engine's day. ----
+_LADDER_KEYS = [k for (k, *_r) in _LADDER_JS]
+_LADDER_SET = set(_LADDER_KEYS)
+_LEAVES = [(_p, _kid) for _p in CATS for _kid in _p['kids']]
+_bad = []
+
+# 1. Structure: every id unique across the whole tree, every parent populated,
+#    every leaf labelled and pointing at something.
+_ids = [_p['key'] for _p in CATS] + [_kid['key'] for _p, _kid in _LEAVES]
+_dupe_ids = sorted({i for i in _ids if _ids.count(i) > 1})
+if _dupe_ids:
+    _bad.append('control ids are not unique: %s' % ', '.join(_dupe_ids))
+for _p in CATS:
+    if not _p.get('kids'):
+        _bad.append('parent %r has no leaves' % _p['key'])
+    if not _p.get('label'):
+        _bad.append('parent %r has no label' % _p['key'])
+for _p, _kid in _LEAVES:
+    if not _kid.get('label'):
+        _bad.append('leaf %r has no label' % _kid['key'])
+    if not _kid.get('keys'):
+        _bad.append('leaf %r covers no ladder key' % _kid['key'])
+    _phantom = [k for k in _kid.get('keys', []) if k not in _LADDER_SET]
+    if _phantom:
+        _bad.append('leaf %r points at keys the engine ladder does not have: %s'
+                    % (_kid['key'], ', '.join(_phantom)))
+
+# 2. Coverage: EXACTLY ONE leaf owns each of the engine's ladder keys. Neither an
+#    unreachable event nor a key that two chips both claim can ship.
+_OWNER = {}
+for _p, _kid in _LEAVES:
+    for _k in _kid['keys']:
+        _OWNER.setdefault(_k, []).append('%s > %s' % (_p['key'], _kid['key']))
+_uncovered = [k for k in _LADDER_KEYS if k not in _OWNER]
 if _uncovered:
-    raise SystemExit('No chip covers engine ladder keys: %s' % ', '.join(_uncovered))
+    _bad.append('no leaf covers engine ladder keys: %s' % ', '.join(_uncovered))
+_multi = ['%s (claimed by %s)' % (k, ' and '.join(v)) for k, v in _OWNER.items() if len(v) > 1]
+if _multi:
+    _bad.append('ladder keys owned by more than one leaf: %s' % '; '.join(_multi))
+
+# 3. Gloss: every ladder key says what the instant means. (GLOSS is also checked
+#    for missing keys where it is defined; this re-checks it here so one gate
+#    reports every reason the panel is incomplete, in one run.)
+_nogloss = [k for k in _LADDER_KEYS if not GLOSS.get(k)]
+if _nogloss:
+    _bad.append('no gloss for engine ladder keys: %s' % ', '.join(_nogloss))
+
+# 4. Migration: the retired scheme cannot silently drop a saved selection. Every
+#    old chip must map somewhere real, and the four of them together must reach
+#    every leaf - otherwise a visitor who had everything on loses something.
+_LEAF_IDS = {_kid['key'] for _p, _kid in _LEAVES}
+_V1_CHIPS = ['sun', 'twilight', 'golden', 'moon']
+_unmapped = [c for c in _V1_CHIPS if not MIGRATE.get(c)]
+if _unmapped:
+    _bad.append('the v1 -> v2 migration drops retired chips: %s' % ', '.join(_unmapped))
+_ghost = sorted({k for v in MIGRATE.values() for k in v} - _LEAF_IDS)
+if _ghost:
+    _bad.append('the v1 -> v2 migration targets leaves that do not exist: %s' % ', '.join(_ghost))
+_unreachable = sorted(_LEAF_IDS - {k for v in MIGRATE.values() for k in v})
+if _unreachable:
+    _bad.append('the v1 -> v2 migration cannot reach leaves: %s' % ', '.join(_unreachable))
+
+if _bad:
+    raise SystemExit('EVENT TREE IS INVALID - build stopped:\n  - ' + '\n  - '.join(_bad))
+
+# The hint behind each chip's tooltip: a single-event leaf explains itself with
+# its gloss; a bundle carries its own sentence. Derived, so it cannot drift.
+_nohint = []
+for _p, _kid in _LEAVES:
+    if len(_kid['keys']) == 1:
+        _kid['hint'] = GLOSS[_kid['keys'][0]]
+    elif not _kid.get('hint'):
+        _nohint.append(_kid['key'])
+if _nohint:
+    raise SystemExit('EVENT TREE IS INVALID - bundle leaves with no hint: %s' % ', '.join(_nohint))
+
+# The proof, printed on every build: which leaf owns which ladder key.
+print('event tree: %d parents, %d leaves, %d engine ladder keys - each key owned by exactly one leaf'
+      % (len(CATS), len(_LEAVES), len(_LADDER_KEYS)))
+for _p, _kid in _LEAVES:
+    print('  %-5s > %-15s %d  %s' % (_p['key'], _kid['key'], len(_kid['keys']), ', '.join(_kid['keys'])))
 
 
 # ---------------- day helpers (build-time formatting of the engine's output) ----------------
@@ -1548,6 +1857,7 @@ def _build_page(d):
         '__PREC__': _json.dumps(PREC, ensure_ascii=False, separators=(',', ':')),
         '__NONE__': _json.dumps(NONE_TEXT, ensure_ascii=False, separators=(',', ':')),
         '__CATS__': _json.dumps(CATS, ensure_ascii=False, separators=(',', ':')),
+        '__MIGRATE__': _json.dumps(MIGRATE, ensure_ascii=False, separators=(',', ':')),
         '__OGTITLE__': og_title,
         '__TWTITLE__': tw_title,
         '__PAGEURL__': page_url,

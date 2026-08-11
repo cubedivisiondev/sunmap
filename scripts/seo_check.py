@@ -40,6 +40,7 @@ import struct
 import sys
 import urllib.error
 import urllib.request
+import zlib
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
@@ -60,6 +61,25 @@ TW_RECOMMENDED = ["twitter:site", "twitter:image:alt"]
 # summary_large_image: Twitter wants >=300x157; Facebook wants >=1200x630.
 MIN_OG_W, MIN_OG_H = 1200, 630
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+# --- icon policy ------------------------------------------------------------
+# Transparency is asserted by ROLE, not by filename, so a renamed icon cannot
+# slip past the check:
+#
+#   <link rel="icon">        a tab strip painted in the OS theme  -> TRANSPARENT
+#   <link rel="apple-touch-icon">  iOS composites it itself       -> OPAQUE
+#   manifest purpose=maskable      the launcher crops and fills   -> OPAQUE
+#   manifest purpose=any           either is legitimate           -> unasserted
+#
+# The transparent rule exists because the set shipped opaque once: every PNG
+# was rasterized with a baked #000 ground, which reads as a black chiclet on a
+# light tab. Same policy STARMAP ships, verified against star_map/icons/.
+APPLE_TOUCH_MIN = 180                 # iOS @3x home screen
+MANIFEST_REQUIRED = ("name", "short_name", "start_url", "scope", "display")
+DISPLAY_MODES = ("fullscreen", "standalone", "minimal-ui", "browser")
+SHORT_NAME_MAX = 12                   # Android truncates a longer home-screen label
+INSTALL_ICON_MIN = 192                # an installable PWA needs 192 and 512, purpose any
+COLOR_RE = re.compile(r"^(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\)|[a-zA-Z]+)$")
 
 # Dev surfaces sit behind a shared password gate; a 401/403 means "not audited",
 # not "broken", and must not be reported as a content defect.
@@ -237,6 +257,150 @@ def image_size(blob: bytes) -> tuple[int, int] | None:
         return struct.unpack("<HH", blob[6:10])
     if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP" and blob[12:16] == b"VP8 ":
         return struct.unpack("<HH", blob[26:30])
+    return None
+
+
+# ---------------------------------------------------------------- icon probes --
+# An icon audit that stops at the header is not an audit. A colour-type-6 PNG
+# whose alpha is 255 everywhere is opaque; a colour-type-3 PNG can be
+# transparent through tRNS. Only the decoded samples settle it, so the alpha
+# census below inflates the IDAT and unfilters it.
+#
+# The same decoder lives in scripts/make_icons.py, deliberately. This file is
+# the shipped auditor: it has to run against a live URL from any checkout with
+# nothing beside it, so it stays one self-contained stdlib script. Fix a bug in
+# one of the two and fix it in the other.
+
+def png_alpha(blob: bytes) -> dict | None:
+    """Dimensions plus a real alpha census. None if the bytes are not a PNG."""
+    if blob[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    w = h = depth = ctype = interlace = 0
+    idat, trns = bytearray(), None
+    i = 8
+    while i + 8 <= len(blob):
+        (n,) = struct.unpack(">I", blob[i:i + 4])
+        kind, data = blob[i + 4:i + 8], blob[i + 8:i + 8 + n]
+        if kind == b"IHDR":
+            w, h, depth, ctype, _c, _f, interlace = struct.unpack(">IIBBBBB", data)
+        elif kind == b"IDAT":
+            idat += data
+        elif kind == b"tRNS":
+            trns = data
+        i += 12 + n
+
+    out = {"w": w, "h": h, "ctype": ctype, "alpha_channel": ctype in (4, 6),
+           "trns": trns is not None, "decoded": False, "why": "",
+           "min_alpha": None, "n_transparent": 0, "corners_transparent": None}
+    chans = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ctype)
+    if interlace:
+        out["why"] = "Adam7 interlaced"
+        return out
+    if chans is None or depth not in (8, 16) or w == 0:
+        out["why"] = f"colour type {ctype} at depth {depth}"
+        return out
+    try:
+        raw = zlib.decompress(bytes(idat))
+    except zlib.error as e:
+        out["why"] = f"IDAT will not inflate ({e})"
+        return out
+    bpp, = (chans * (depth // 8),)
+    stride = w * bpp
+    if len(raw) < h * (stride + 1):
+        out["why"] = "IDAT short for the declared dimensions"
+        return out
+
+    prev, rows, pos = bytearray(stride), [], 0
+    for y in range(h):
+        ft = raw[pos]
+        line = bytearray(raw[pos + 1:pos + 1 + stride])
+        pos += 1 + stride
+        if ft == 1:                                     # Sub
+            for x in range(bpp, stride):
+                line[x] = (line[x] + line[x - bpp]) & 0xFF
+        elif ft == 2:                                   # Up
+            for x in range(stride):
+                line[x] = (line[x] + prev[x]) & 0xFF
+        elif ft == 3:                                   # Average
+            for x in range(stride):
+                a = line[x - bpp] if x >= bpp else 0
+                line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xFF
+        elif ft == 4:                                   # Paeth
+            for x in range(stride):
+                a = line[x - bpp] if x >= bpp else 0
+                c = prev[x - bpp] if x >= bpp else 0
+                b = prev[x]
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[x] = (line[x] + pr) & 0xFF
+        elif ft != 0:                                   # None
+            out["why"] = f"unknown PNG filter {ft} on row {y}"
+            return out
+        rows.append(line)
+        prev = line
+
+    if ctype in (4, 6):
+        aoff = (chans - 1) * (depth // 8)
+        at = lambda x, y: rows[y][x * bpp + aoff]
+    elif ctype == 3 and trns is not None:
+        tbl = list(trns) + [255] * 256
+        at = lambda x, y: tbl[rows[y][x]]
+    else:
+        out.update(decoded=True, min_alpha=255, n_transparent=0, corners_transparent=False)
+        return out
+    alphas = [at(x, y) for y in range(h) for x in range(w)]
+    corners = ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))
+    out.update(decoded=True, min_alpha=min(alphas),
+               n_transparent=sum(1 for a in alphas if a == 0),
+               corners_transparent=all(at(x, y) == 0 for x, y in corners))
+    return out
+
+
+def ico_probe(blob: bytes) -> list[dict] | None:
+    """Every image in a .ico, with the alpha census of each PNG payload."""
+    if len(blob) < 6:
+        return None
+    reserved, kind, n = struct.unpack("<HHH", blob[:6])
+    if reserved != 0 or kind != 1 or n == 0 or len(blob) < 6 + 16 * n:
+        return None
+    out = []
+    for i in range(n):
+        w, h, _cc, _r, _pl, bits, size, off = struct.unpack(
+            "<BBBBHHII", blob[6 + i * 16:22 + i * 16])
+        payload = blob[off:off + size]
+        entry = {"w": w or 256, "h": h or 256, "bits": bits,
+                 "png": payload[:8] == b"\x89PNG\r\n\x1a\n", "alpha": None}
+        if entry["png"]:
+            entry["alpha"] = png_alpha(payload)
+        out.append(entry)
+    return out
+
+
+_SVG_LEN = re.compile(r'(width|height)="([\d.]+)(%?)"')
+
+
+def svg_opaque_ground(text: str) -> str | None:
+    """The full-bleed <rect> that turns a transparent mark into a chiclet.
+
+    Returns the offending tag, or None. Cheap to reintroduce (one line in a
+    generator) and invisible in a directory listing, so it gets its own check."""
+    vb = re.search(r'viewBox="[\d.\-]+ [\d.\-]+ ([\d.]+) ([\d.]+)"', text)
+    side_w = float(vb.group(1)) if vb else 0.0
+    side_h = float(vb.group(2)) if vb else 0.0
+    for m in re.finditer(r"<rect\b[^>]*>", text):
+        tag = m.group(0)
+        fill = re.search(r'fill="([^"]+)"', tag)
+        if fill and fill.group(1).strip().lower() in ("none", "transparent"):
+            continue
+        if fill is None and "fill:" not in tag:
+            continue        # no fill at all paints black, but only if it has size
+        dims = {k: (float(v), pct) for k, v, pct in _SVG_LEN.findall(tag)}
+        wv, wp = dims.get("width", (0.0, ""))
+        hv, hp = dims.get("height", (0.0, ""))
+        if (wp == "%" and wv >= 100) or (side_w and wv >= side_w):
+            if (hp == "%" and hv >= 100) or (side_h and hv >= side_h):
+                return tag
     return None
 
 
