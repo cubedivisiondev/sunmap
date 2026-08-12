@@ -270,6 +270,14 @@ class Source:
         self.base_url = base_url.rstrip("/") + "/" if base_url else None
         self.remote = base_url is not None
         self._cache: dict[str, tuple[int, bytes, str]] = {}
+        # Response headers per path, remote only. The 2026-08-11 near-miss: the
+        # SUNMAP prod distribution carried a `dev-no-index` response-headers
+        # policy emitting `X-Robots-Tag: noindex, nofollow`, and this auditor
+        # passed 97/0 because it only ever read the HTML meta and robots.txt.
+        # An HTTP X-Robots-Tag OVERRIDES a permissive robots.txt, so the debut of
+        # a brand-new domain would have been authoritatively de-indexed with
+        # every gate green. Headers are now first-class evidence.
+        self.headers: dict[str, dict[str, str]] = {}
 
     def _local_path(self, path: str) -> str:
         p = urlparse(path).path if "://" in path else path
@@ -288,8 +296,10 @@ class Source:
             try:
                 with urllib.request.urlopen(req, timeout=20) as r:
                     out = (r.status, r.read(), url)
+                    self.headers[path] = {k.lower(): v for k, v in r.headers.items()}
             except urllib.error.HTTPError as e:
                 out = (e.code, b"", url)
+                self.headers[path] = {k.lower(): v for k, v in (e.headers or {}).items()}
             except Exception as e:  # DNS, TLS, timeout
                 out = (0, b"", f"{url} ({type(e).__name__}: {e})")
         else:
@@ -931,6 +941,42 @@ def audit_site(rep: Report, src: Source, env: str, pages: list[str],
                      f"{want} exists but is not in sitemap.xml (secondary page)")
 
 
+def audit_response_headers(rep: Report, src: Source, env: str) -> None:
+    """The HTTP layer's own robots directives, which outrank the HTML entirely.
+
+    Only meaningful against a live origin - a local build has no headers - so a
+    filesystem run reports this as not-applicable rather than silently passing.
+    On prod an `X-Robots-Tag` carrying noindex/nofollow/none is a HARD FAIL: it
+    overrides robots.txt and the absence of a meta noindex, and it is invisible
+    to every other check in this file. On dev the same header is expected and is
+    reported as correct.
+    """
+    sec = "HEADERS"
+    if not src.remote:
+        rep.warn(sec, "X-Robots-Tag", "local build - no HTTP layer to audit (run with --url)")
+        return
+
+    src.get("index.html")                       # populate the header cache
+    h = src.headers.get("index.html", {})
+    if not h:
+        rep.fail(sec, "X-Robots-Tag", "no response headers captured - cannot prove the HTTP layer is clean")
+        return
+
+    xr = h.get("x-robots-tag", "")
+    blocking = any(t in xr.lower() for t in ("noindex", "nofollow", "none"))
+    if env == "prod":
+        rep.check(sec, not blocking, "X-Robots-Tag",
+                  f"absent or permissive ({xr!r})" if xr else "absent - prod is indexable",
+                  f"PROD SERVES {xr!r} - this overrides robots.txt and de-indexes the site. "
+                  "Check the distribution's response-headers policy; a dev no-index policy "
+                  "attached to a prod distribution is the known cause.")
+    else:
+        rep.check(sec, blocking, "X-Robots-Tag",
+                  f"{xr!r} - dev correctly withheld from search",
+                  f"dev is NOT carrying a noindex header ({xr!r}) - a gated dev host should "
+                  "still refuse indexing at the HTTP layer")
+
+
 # --------------------------------------------------------------- agpl surface --
 def audit_agpl(rep: Report, src: Source, env: str) -> None:
     """Assert the corresponding-source offer exists, resolves, and corresponds.
@@ -1131,6 +1177,7 @@ def main() -> int:
                    page_role(page, sitemap_paths), robots_blocks_all)
 
     audit_site(rep, src, env, pages, sitemap_paths)
+    audit_response_headers(rep, src, env)
     audit_agpl(rep, src, env)
 
     # A run that read nothing is not a pass. Every page can be skipped legitimately
