@@ -1987,7 +1987,14 @@ from datetime import date as _date
 # lastmod 2026-08-11, telling Googlebot's first crawl of a brand-new domain that a
 # page declaring changefreq=daily was last modified the day before the day it is
 # about. DAY is the rendered date, so the two can no longer disagree.
-_today = DAY.isoformat()
+# lastmod tracks the EDITION the page carries, CLAMPED to never be in the future.
+# Two rules were in tension and both are right: a page declaring changefreq=daily
+# should not tell a first crawl it was last modified the day before the day it is
+# about, and a sitemap must never claim a future lastmod (seo_check enforces the
+# latter, and caught this). min() satisfies both - on the ship morning the edition
+# IS today so lastmod is the edition; pre-building tomorrow's edition tonight
+# emits today, which is both valid and true, since that is when the file was written.
+_today = min(DAY, _date.today()).isoformat()
 _sm = ['<?xml version="1.0" encoding="UTF-8"?>',
        '<!-- SPDX-License-Identifier: AGPL-3.0-or-later',
        '     Copyright (C) 2026 PUDDY Inc. <legal@puddystudios.com> -->',
