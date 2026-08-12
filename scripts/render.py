@@ -955,18 +955,31 @@ function chrome(){
   rows.forEach(function(r,i){foot.append(r[0],txt(r[1]));if(i<rows.length-1)foot.append(el('br'));});
   localizeTimes();
 }
-/* Re-render every baked instant in the FAQ in the viewer's timezone */
-function localizeTimes(){
-  var zs=document.querySelectorAll('.faq time[datetime]');
-  for(var i=0;i<zs.length;i++){
-    var t=zs[i], iso=t.getAttribute('datetime');
-    try{
-      t.textContent = t.hasAttribute('data-d')
-        ? new Date(iso).toLocaleDateString('en-US',{timeZone:tz,month:'long',day:'numeric',year:'numeric'})
-        : toSec(iso).toLocaleString('en-US',Object.assign({month:'long',day:'numeric',year:'numeric'},clockOpts()));
-    }catch(e){}
-  }
-}
+/* THE FAQ IS NOT LOCALIZED, DELIBERATELY.
+
+   This function used to re-render every baked FAQ instant in the VIEWER's
+   timezone. The arithmetic was right - the instant is the same moment - and the
+   result was still false, in the same way STARMAP's eclipse panel was false:
+
+     Q: "What time is sunrise and sunset in Empire State Building on August 12?"
+     A: "Sunrise falls at 3:03:06 AM PDT ... a day 13 hours 55 minutes long."
+
+   Sunrise at the Empire State Building is 6:03:06 AM EDT. Converting that
+   instant to a Pacific viewer's clock and printing it under a heading that
+   names the Empire State Building asserts that the sun rises there at 3 AM. The
+   surrounding prose is not converted either - the day length stayed ECLREF's -
+   so the block mixed two frames in one sentence. And this is the FAQ: the rich
+   result, the surface Googlebot and AI search quote.
+
+   A sunrise is an event AT A PLACE. It belongs to that place's clock. The baked
+   text already names both the place and the timezone and is correct as written,
+   so the honest fix is to leave it alone. The interactive ladder above is the
+   personalized surface and genuinely recomputes for the visitor; this block is
+   the default observer's, and says so.
+
+   Kept as a no-op rather than deleted so the call site stays intact and so this
+   reasoning sits where the next agent will look for it. */
+function localizeTimes(){ /* intentionally does nothing - see above */ }
 
 // Hieroglyph glyph-scramble (ported from the main site's GlitchText): click the sigil to scramble
 // the title + subtitle through sacred glyphs, revealing left-to-right over ~900ms.
@@ -1968,7 +1981,13 @@ print(f'built the sunmap page for {DAY.isoformat()} at {OBS_LABEL}  base={BASE} 
 
 # ---------------- sitemap.xml + robots.txt + 404.html + source.html ----------------
 from datetime import date as _date
-_today = _date.today().isoformat()
+# lastmod is the EDITION the page carries, not the wall clock of whatever machine
+# built it. Those differ whenever a build straddles midnight or renders --date for
+# another day: tonight's 23:40 PDT build of the August 12 edition emitted
+# lastmod 2026-08-11, telling Googlebot's first crawl of a brand-new domain that a
+# page declaring changefreq=daily was last modified the day before the day it is
+# about. DAY is the rendered date, so the two can no longer disagree.
+_today = DAY.isoformat()
 _sm = ['<?xml version="1.0" encoding="UTF-8"?>',
        '<!-- SPDX-License-Identifier: AGPL-3.0-or-later',
        '     Copyright (C) 2026 PUDDY Inc. <legal@puddystudios.com> -->',
