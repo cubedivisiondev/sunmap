@@ -31,10 +31,10 @@ scripts/seo_check.py fails the run if that happens.
 
 WHERE THE DATA COMES FROM
   build time  scripts/solar.py  -> the prerendered crawlable ladder + the FAQ,
-              computed for the DEFAULT observer (New York City, the tzdata
-              principal point sunmap-geo.js also defaults to) on --date.
+              computed for the DEFAULT observer (the Empire State Building, the
+              same point sunmap-geo.js also defaults to) on --date.
   run time    sunmap-worker.js  -> the same JSON shape, recomputed on the
-              device for the visitor's own coordinates, elevation and day.
+              device for the visitor's own coordinates and day.
   The two are interchangeable by contract, so the JS list hydrates straight
   over the prerendered one.
 
@@ -209,7 +209,7 @@ __JSONLD__
   #foot .foot-c{font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--faint);margin:0}
   body:has(.pt-sfoot) #foot{display:none}  /* the JS studios chrome replaces this no-JS fallback */
   .ev{scroll-margin-top:84px}  /* clears the fixed studios nav when a searched day jumps to the top */
-  .ev.daymark{outline:1px solid var(--fg);background:rgba(255,255,255,.08)}  /* stays lit until a new day is searched */
+  .ev.daymark{outline:1px solid var(--fg);background:rgba(255,255,255,.08);padding-left:14px;padding-right:14px;margin-left:-14px;margin-right:-14px}  /* stays lit until a new day is searched */
   #yn-menu{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.96);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);overflow-y:auto;display:none}
   #yn-menu .ym-wrap{max-width:1080px;margin:0 auto;padding:30px clamp(20px,5vw,44px) 80px}
   #yn-menu .ym-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
@@ -404,7 +404,6 @@ __JSONLD__
   <div class="section"><div class="slabel">Show events (tap to add or remove)</div><div class="cats" id="cats"></div></div>
   <div class="section"><div class="triad">
     <div class="col"><div class="slabel">Range</div><div class="seg" id="range"></div></div>
-    <div class="col"><div class="slabel">Elevation</div><div class="seg" id="frame"></div><div class="note" id="frame-note"></div></div>
     <div class="col"><div class="slabel">Clock</div><div class="seg" id="engine"></div></div>
   </div></div>
   <div class="section loc-section">
@@ -416,7 +415,7 @@ __JSONLD__
       </div>
       <div id="loc-suggest" role="listbox" aria-label="Location suggestions"></div>
     </div>
-    <div class="tzactive">Showing times for <b id="tz-active">New York City</b></div>
+    <div class="tzactive">Showing times for <b id="tz-active">Empire State Building</b></div>
     <div class="locstatus" id="loc-status"></div>
   </div>
 </div></nav>
@@ -458,7 +457,7 @@ function activeKeys(){const s=new Set();
   for(const k of LEAVES)if(sel.has(k.key))for(const key of k.keys)s.add(key);
   return s;}
 
-let DATA=null, sel=new Set(), frame='sea', engine='h12', range='all', day=DAY0, tz='__TZ0__', loc=null;
+let DATA=null, sel=new Set(), engine='h12', range='all', day=DAY0, tz='__TZ0__', loc=null;
 let NEXTDATA=null;  /* the following day, so the next-event card rolls over instead of dead-ending */
 
 /* Everything below builds DOM with createElement + textContent. Place names come
@@ -474,7 +473,7 @@ function clear(n){while(n.firstChild)n.removeChild(n.firstChild);return n;}
 function txt(s){return document.createTextNode(s);}
 
 function read(k){try{return JSON.parse(localStorage.getItem(k));}catch(e){return null;}}
-function dials(s){frame=s.frame||frame;engine=s.engine||engine;range=s.range||range;}
+function dials(s){engine=s.engine||engine;range=s.range||range;}
 function load(){
   const s=read(LS);
   if(s&&typeof s==='object'){
@@ -495,7 +494,7 @@ function load(){
   }
   sel=defaults();
 }
-function save(){try{localStorage.setItem(LS,JSON.stringify({v:2,cats:[...sel],frame,engine,range}));}catch(e){}}
+function save(){try{localStorage.setItem(LS,JSON.stringify({v:2,cats:[...sel],engine,range}));}catch(e){}}
 
 /* ---- the engine. Same JSON contract as scripts/solar.py, solved on the device
    so no coordinate ever leaves it. ---- */
@@ -516,13 +515,13 @@ function addDays(iso,n){const[y,m,d]=iso.split('-').map(Number);
    next-event card can roll over midnight. It never touches the visible list. */
 function requestNextDay(){
   if(!loc)return;NEXTDATA=null;
-  worker.postMessage({base:B,coords:{lat:loc.lat,lon:loc.lon,alt:(frame==='ground'?(loc.alt||0):0)},
+  worker.postMessage({base:B,coords:{lat:loc.lat,lon:loc.lon,alt:0},
     date:addDays(day,1),tz:tz,moon:true});}
 
 function compute(){
   if(!loc)return;
   $('status').textContent='Solving '+dayLabel()+'...';
-  worker.postMessage({base:B,coords:{lat:loc.lat,lon:loc.lon,alt:(frame==='ground'?(loc.alt||0):0)},
+  worker.postMessage({base:B,coords:{lat:loc.lat,lon:loc.lon,alt:0},
     date:day,tz:tz,moon:true});
 }
 
@@ -741,31 +740,7 @@ function buildControls(){
     opts.forEach(([k,l])=>{const b=el('button','chip',l);b.type='button';b.dataset.chip=id+'-'+k;
       b.setAttribute('aria-pressed',k===cur);b.onclick=()=>{set(k);save();buildControls();render();chrome();};host.appendChild(b);});};
   seg('range',[['now','From now'],['all','All day']],range,k=>range=k);
-  seg('frame',[['sea','Sea level'],['ground','Your elevation']],frame,k=>{frame=k;compute();});
   seg('engine',[['h12','12-hour'],['h24','24-hour']],engine,k=>engine=k);
-  /* MEASURED, not assumed, and the toggle drives the effect that actually
-     matters. Swiss's own altitude argument only feeds an internal PRESSURE
-     model - thinner air refracts less - which moved the 2026-08-12 LA sunrise
-     +2.4 s at 101 m, +23.0 s at 1000 m and +62.6 s at 3000 m: LATER as you
-     climb, which is backwards for anyone standing on a mountain. What a human
-     up there experiences is the horizon falling away, and SUNMAP supplies that
-     to Swiss as horhgt = -(1.76*sqrt(h))/60 degrees. Same sunrise, same day:
-     -103.2 s, -321.5 s, -547.3 s. The dip formula here is the one in
-     scripts/solar.py, so the label and the engine cannot drift apart. */
-  const fn=$('frame-note');
-  const dipDeg=(loc&&loc.alt>0)?1.76*Math.sqrt(loc.alt)/60:0;
-  if(fn)fn.textContent=dipDeg
-    ?('Elevation '+Math.round(loc.alt)+' m - From up here the horizon falls '+dipDeg.toFixed(2)
-      +' degrees below level, so the Sun and Moon clear it earlier and set later. Sea level ignores '
-      +'that drop. Twilight and golden hour do not move either way. Both settings assume a clear '
-      +'horizon at sea level all the way round, so a ridge or a building to your east delays '
-      +'sunrise by an amount no ephemeris can know.')
-    :(loc&&loc.alt<0)
-      ?('Elevation '+Math.round(loc.alt)+' m - Below sea level the horizon sits at your own level, '
-        +'so there is no drop to model and no dip is applied. The denser air down here does refract '
-        +'a little more, so Your elevation still lands sunrise a few seconds earlier and sunset a '
-        +'few seconds later than Sea level. Twilight and golden hour do not move either way.')
-      :'No elevation known for this point, so both settings agree.';
   $('tz-active').textContent=locLabelTZ();
   initLocationBox();
 
@@ -778,7 +753,7 @@ function buildControls(){
    network stack, the on-device city table, the 7-day cache, the Photon ->
    Nominatim fallback and the GPS -> IP chain all live in sunmap-geo.js, which
    is STARMAP's own location stack ported and verified. This is only the UI. ---- */
-function locLabel(){return (loc&&loc.label)||'New York City';}
+function locLabel(){return (loc&&loc.label)||'Empire State Building';}
 function tzName(){try{var ps=new Intl.DateTimeFormat('en-US',{timeZone:tz,timeZoneName:'longGeneric'}).formatToParts(new Date());
   var p=ps.find(function(x){return x.type==='timeZoneName';});return p?p.value:'';}catch(e){return '';}}
 function locLabelTZ(){var n=tzName();return locLabel()+(n?' ('+n+')':'');}
@@ -958,7 +933,7 @@ function chrome(){
     ', sunrise to the sunset that follows it. '];
   note.append(para(lenBits.concat(['The Moon is ',b((mn.illumination_pct!=null?mn.illumination_pct:0).toFixed(1)+'%'),
     ' illuminated, ',b((mn.apparent_diameter_arcsec!=null?mn.apparent_diameter_arcsec:0).toFixed(1)+'"'),' across.'])));
-  note.append(para([b('Topocentric'),' = the sky from where you stand. Your latitude, longitude and elevation '+
+  note.append(para([b('Topocentric'),' = the sky from where you stand. Your latitude and longitude '+
     'move every time on this page - Computed on your device, never sent anywhere.']));
   var src=el('p','srcnote');
   src.append(txt('SUNMAP runs the '),b('Swiss Ephemeris'),txt(' (© Astrodienst AG) on your device under the '),
@@ -1071,8 +1046,8 @@ dayHash();
     stale=false;
   }
   function count(){var area=W*H;
-    if(MOBILE) return Math.max(8, Math.min(Math.floor(area/60000)*INTENSITY, 16));
-    return Math.max(14, Math.min(Math.floor(area/34000)*INTENSITY, 46));}
+    if(MOBILE) return Math.max(12, Math.min(Math.floor(area/38000)*INTENSITY, 26));
+    return Math.max(22, Math.min(Math.floor(area/21000)*INTENSITY, 76));}
   function seed(p, spread){
     // Born just off the sun on a random bearing and travelling straight out. sp is the
     // beam's OWN outward speed and vx/vy stay a separate impulse channel, so the mouse
@@ -1084,7 +1059,7 @@ dayHash();
     p.x=OX+Math.cos(a)*r0; p.y=OY+Math.sin(a)*r0;
     p.vx=0; p.vy=0; p.sp=0.90+Math.random();
     p.maxLife=260+Math.random()*210; p.life=spread?Math.random()*p.maxLife:0;
-    p.len=140+Math.random()*200; p.size=Math.random()*1.4+0.6;
+    p.len=170+Math.random()*230; p.size=Math.random()*1.7+0.9;
     return p;
   }
   function build(){
@@ -1110,11 +1085,13 @@ dayHash();
       if(!frozen){ p.x+=ux*p.sp+p.vx; p.y+=uy*p.sp+p.vy; p.life++; p.vx*=0.99; p.vy*=0.99; }
       // Gold at the origin, transparent at the rim - twice over. The whole beam dims with
       // distance from the sun (fade), and along its own length it is brightest at the
-      // INNER end and gone at the head, so every streak points home. Peak alpha is still
-      // 0.30, the same single-stroke ceiling the shaft field had: nothing in this field is
-      // brighter than anything STARMAP ever drew, it is only arranged differently.
-      var fade=1-Math.min(1,Math.pow(d/RMAX,1.4));
-      var op=Math.sin((p.life/p.maxLife)*Math.PI)*0.30*fade;
+      // INNER end and gone at the head, so every streak points home. Peak alpha is 0.62:
+      // the first pass held STARMAP's 0.30 star-field ceiling and the burst was too faint
+      // to read as light, which is the whole point of SUNMAP. The fade exponent is 1.15
+      // rather than 1.4 so a beam is still visible at half reach instead of dying just
+      // outside the crest, and the gold is unchanged - brighter, never a different colour.
+      var fade=1-Math.min(1,Math.pow(d/RMAX,1.15));
+      var op=Math.sin((p.life/p.maxLife)*Math.PI)*0.62*fade;
       // The tail never crosses the sun. Capping it at 0.92d makes the near beams short
       // stubs and the far ones long rays, which is what a burst actually looks like, and
       // it guarantees every tail converges on the sigil rather than through it.
@@ -1313,12 +1290,14 @@ except ImportError as _e:  # pragma: no cover - a build without the engine is a 
         'Install pyswisseph (pip install pyswisseph) and rebuild. Emitting a page '
         'without a prerendered ladder would ship an empty crawlable surface.' % _e)
 
-# The default observer. The tzdata principal point for America/New_York - the
-# same real, sourced coordinates sunmap-geo.js defaults to, so the prerendered
-# page and a first-visit-before-geolocation page agree.
-OBS_LAT, OBS_LON, OBS_ALT = 40.7142, -74.0064, 0.0
+# The default observer, for a visitor who has not shared a location. The Empire
+# State Building - a real, fixed, unambiguous point rather than a city centroid,
+# so the printed ladder is a place someone can actually stand. The SAME literal
+# coordinates are sunmap-geo.js's DEFAULT_LOCATION, so the prerendered page and a
+# first-visit-before-geolocation page agree to the second.
+OBS_LAT, OBS_LON, OBS_ALT = 40.748440, -73.985664, 0.0
 OBS_TZ = 'America/New_York'
-OBS_LABEL = 'New York City'
+OBS_LABEL = 'Empire State Building'
 
 _PT = _ZoneInfo(OBS_TZ)
 _MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
@@ -1644,7 +1623,7 @@ def _build_page(d):
            'Every twilight, golden hour, transit, moonrise and moonset below is solved to the '
            f'second with the Swiss Ephemeris (DE441) for {_html.escape(OBS_LABEL)} - Choose your '
            'own location on the page and the whole ladder recomputes on your device, for your '
-           'latitude, longitude, elevation and day.</p>',
+           'latitude, longitude and day.</p>',
            f'<h2>{_html.escape(_long(d))} - {_html.escape(OBS_LABEL)}</h2><ul>']
     for e in evs:
         glyph = '☉' if e['body'] == 'sun' else '☽'
@@ -1767,8 +1746,8 @@ def _build_page(d):
     # separate abbreviated Meeus series at a much coarser tolerance. Claiming NOAA
     # over the whole ladder, moonrise included, was more than the harness proves.
     acc = ('Every instant is computed with the Swiss Ephemeris (DE441) on the JPL DE441 ephemerides '
-           'and resolved to the second, topocentrically, for a specific latitude, longitude and '
-           'elevation. A second implementation that shares no code with the engine verifies the '
+           'and resolved to the second, topocentrically, for a specific latitude and longitude. '
+           'A second implementation that shares no code with the engine verifies the '
            'ladder event by event: the solar events against the NOAA Solar Calculator algorithm, '
            'the lunar ones against an independent Meeus lunar series, which is coarser and is asked '
            'only to catch a wrong day or an inverted crossing. The remaining uncertainty is not in '
@@ -1776,17 +1755,13 @@ def _build_page(d):
            'refraction Swiss Ephemeris models, where the classic almanac convention is 34, and real '
            'atmosphere departs from both, so an '
            'observed sunrise against a real horizon can differ from any computed one by a few tens '
-           'of seconds. Your elevation is modelled where it counts. Stand high and the horizon '
-           'falls away below you, 0.29 degrees at 101 metres and 1.61 degrees at 3000 metres, so '
-           'the Sun clears it earlier and sets later: at 3000 metres sunrise lands about nine '
-           'minutes earlier than it does at the shore. That dip applies to sunrise, sunset, '
-           'moonrise and moonset, the four events defined by the horizon you can actually see. '
-           'Twilight and golden hour are angles of the Sun centre measured from level, so they do '
-           'not move with your elevation at all. One limit is worth naming plainly, and it is the '
-           'ground: the dip assumes a clear horizon at sea level all the way round, so a ridge or '
-           'a building to your east delays sunrise by an amount no ephemeris can know. Every other '
-           'almanac rounds to the minute and hides all of it. SUNMAP prints the second and names '
-           'the limit.')
+           'of seconds. Two limits are worth naming plainly, and both are the horizon rather than '
+           'the sky. Every rise and set here is solved against a clear sea-level horizon, the '
+           'same reference every published almanac uses, so from a summit the Sun clears the real '
+           'horizon earlier than the printed time and sets later. And a ridge or a building to '
+           'your east delays sunrise by an amount no ephemeris can know. Every other almanac '
+           'rounds to the minute and hides all of it. SUNMAP prints the second and names the '
+           'limits.')
     faq.append(('How accurate are these sunrise and sunset times?', acc, _html.escape(acc)))
 
     fh = [f'<h2>{_html.escape(_long(d))} - Frequently Asked Questions</h2>',
@@ -1905,7 +1880,7 @@ def _build_page(d):
          'isAccessibleForFree': True,
          'installUrl': PROD,
          # Every line below is a control or an output the page actually ships:
-         # the four segmented dials (range, elevation frame, clock), the location
+         # the two segmented dials (range, clock), the location
          # box, the day wheels bounded by YEARS, and the manifest + service worker.
          # Nothing aspirational goes in this list.
          'featureList': [
@@ -1916,8 +1891,6 @@ def _build_page(d):
              'illumination and apparent diameter',
              f'Any day from {YEARS[0]} to {YEARS[-1]}',
              'Search any place by name, or use your device location',
-             'Sea-level horizon, or your own elevation with the true dip of the '
-             'horizon applied to sunrise, sunset, moonrise and moonset',
              '12-hour or 24-hour clock',
              'The whole ladder is solved on your device by a Swiss Ephemeris '
              'WASM engine, not fetched from a server',
@@ -2033,7 +2006,7 @@ solar midnight; and moonrise, lunar noon, moonset and lunar midnight.
 ## What is authoritative here
 
 - Engine: Swiss Ephemeris (DE441) on the JPL DE441 ephemerides, called through
-  swe_rise_trans, topocentric for the observer's latitude, longitude and elevation.
+  swe_rise_trans, topocentric for the observer's latitude and longitude.
 - Precision: every instant is resolved to the second, never rounded to the minute.
 - Cross-check: a second implementation sharing no code with the engine verifies
   the ladder event by event - the solar events against the NOAA Solar Calculator

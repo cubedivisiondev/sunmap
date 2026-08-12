@@ -42,7 +42,7 @@ source at no charge.
 | `swisseph-wasm-0.0.5-npm/` | The exact `swisseph-wasm@0.0.5` npm package SUNMAP serves. Its `wasm/swisseph.js` + `wasm/swisseph.wasm` are the files that run in the browser | GPL-3.0-or-later (Copyright 2024 prolaxu) | npm `swisseph-wasm@0.0.5` (registry.npmjs.org/swisseph-wasm/-/swisseph-wasm-0.0.5.tgz) | 914,222 |
 | `swisseph-wasm-main/` | The `swisseph-wasm` build harness: `compile.sh` (the Emscripten command and its exported function list) that produces `swisseph.js` + `swisseph.wasm` | GPL-3.0-or-later | github.com/prolaxu/swisseph-wasm | 12,652,931 |
 | `sunmap-worker.js` | SUNMAP's module worker - imports vendor/sweph/swisseph.js and drives the engine. This is the COMBINED WORK. | AGPL-3.0-or-later (Copyright 2026 PUDDY Inc.) | this product | 40,327 |
-| `sunmap-geo.js` | SUNMAP's observer-input module (coordinates, elevation, timezone). Released under the same license. | AGPL-3.0-or-later (Copyright 2026 PUDDY Inc.) | this product | 71,034 |
+| `sunmap-geo.js` | SUNMAP's observer-input module (coordinates, elevation, timezone). Released under the same license. | AGPL-3.0-or-later (Copyright 2026 PUDDY Inc.) | this product | 71,199 |
 | `AGPL-3.0.txt` | Full GNU Affero GPL v3.0 text | - | gnu.org/licenses/agpl-3.0.txt | - |
 | `GPL-3.0.txt` | Full GNU GPL v3.0 text | - | gnu.org/licenses/gpl-3.0.txt | - |
 
@@ -57,7 +57,7 @@ The two engine files SUNMAP serves, and their copies inside
 SUNMAP's own files in this archive, SHA-256:
 
     5040a21278b0209b2bd1192ffd5c70456f98783b59d4be224d030d3245e0a1ff  sunmap-worker.js
-    fe5d586350715175c893b5f21a8c499e2a89dd411df19aca383a1ccdc4a5c607  sunmap-geo.js
+    3c5f2eba79b0436f6344caa903259782cb7cd764c31f47fd60d6e8846a8b5410  sunmap-geo.js
 
 Verify any of them against the served copies:
 

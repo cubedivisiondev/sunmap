@@ -124,12 +124,14 @@ const NEAR_KM = 100;
  *  this. STARMAP renders it as the last row of the suggestion list. */
 export const ATTRIBUTION = 'Location search by OpenStreetMap (Photon + Nominatim)';
 
-/** The default observer: the tzdata principal location for America/New_York.
- *  It is a real sourced point, not a made-up one, and it matches STARMAP's
- *  default so the two products agree on "nowhere chosen yet". */
+/** The default observer, for a visitor who has not shared a location: the
+ *  Empire State Building. A real, fixed, unambiguous point rather than a city
+ *  centroid, so "nowhere chosen yet" is still somewhere a person can stand.
+ *  render.py hardcodes these same coordinates, so the prerendered page and a
+ *  first-visit-before-geolocation page agree to the second. */
 const DEFAULT_LOCATION = {
-  lat: 40.7142, lon: -74.0064, alt: 0, tz: 'America/New_York',
-  label: 'New York City', source: 'default',
+  lat: 40.748440, lon: -73.985664, alt: 0, tz: 'America/New_York',
+  label: 'Empire State Building', source: 'default',
   alt_source: 'default', tz_source: 'table', tz_ref_km: 0, approx: true
 };
 
