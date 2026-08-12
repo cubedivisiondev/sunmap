@@ -38,8 +38,11 @@ solar midnight; and moonrise, lunar noon, moonset and lunar midnight.
   36.7 arcminutes Swiss Ephemeris models, against the classic 34 arcminute
   convention, while real atmosphere departs from both.
 - Coverage: any day from 1900 to 2099, anywhere on Earth.
-- The prerendered copy a crawler sees is computed for Empire State Building
-  (40.74844, -73.985664); choosing a location recomputes every row on the device.
+- The prerendered copy a crawler sees is a WORKED EXAMPLE, computed for Empire State Building
+  (40.74844, -73.985664) on 2026-08-12; choosing a location recomputes every
+  row on the device, for that visitor's own day and place. The page is not rebuilt
+  on a schedule and does not need to be - every dated string in it names its own
+  day, and every live number is solved in the browser.
 
 ## Key URLs
 
