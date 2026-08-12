@@ -309,7 +309,7 @@ __JSONLD__
 
   main{padding:8px 0 60px;min-height:40vh;background:rgba(0,0,0,.4);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
   .status{font-family:var(--mono);font-size:12px;color:var(--faint);padding:18px 0 4px}
-  .month{font-family:var(--mono);font-size:13px;letter-spacing:.24em;text-transform:uppercase;color:var(--faint);padding:30px 0 10px;border-bottom:1px solid var(--line)}
+  .month{font-family:var(--mono);font-weight:400;font-size:13px;letter-spacing:.24em;text-transform:uppercase;color:var(--faint);padding:30px 0 10px;border-bottom:1px solid var(--line)}
   .ev{display:grid;grid-template-columns:168px 1fr auto;gap:20px;align-items:baseline;padding:15px 0;border-bottom:1px solid var(--line)}
   .ev .d{font-weight:600;font-size:15px;white-space:nowrap}
   .ev .t{font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:4px;white-space:nowrap}
@@ -424,7 +424,7 @@ __JSONLD__
 
 <main class="wrap"><div class="status" id="status">Loading...</div><div id="list">__PRERENDER_LIST__</div></main>
 <section class="wrap yeardir" aria-label="Browse every day of the month">__YEARS_DIR__</section>
-<section class="wrap faq" aria-label="__YEAR__ sunrise and sunset - Frequently asked questions">__FAQ_HTML__</section>
+<section class="wrap faq" aria-label="Sunrise and sunset - Frequently asked questions">__FAQ_HTML__</section>
 <footer class="wrap" id="foot"><nav class="foot-nav" aria-label="Puddy Studios"><a href="https://puddystudios.com/about">About</a><a href="https://puddystudios.com/contact">Contact</a><a href="https://puddystudios.com/privacy">Privacy</a><a href="https://puddystudios.com/terms">Terms</a><a href="https://starmap.puddystudios.com/">Starmap</a><a href="__B__source.html">Source</a></nav><p class="foot-c">&copy; 2026 PUDDY INC. - ALL RIGHTS RESERVED</p></footer>
 
 <script type="module">
@@ -460,6 +460,12 @@ function activeKeys(){const s=new Set();
   return s;}
 
 let DATA=null, sel=new Set(), engine='h12', range='all', day=DAY0, tz='__TZ0__', loc=null;
+/* True once the visitor pins a day. Until then the day follows the RESOLVED
+   timezone: geo emits a default synchronously, so the first todayIn(tz) ran while
+   tz was still America/New_York, and the later IP emit arrived with first=false
+   and never corrected it. A first-time Los Angeles visitor after 21:00 PDT was
+   shown TOMORROW's ladder. */
+let dayPinned=false;
 let NEXTDATA=null;  /* the following day, so the next-event card rolls over instead of dead-ending */
 
 /* Everything below builds DOM with createElement + textContent. Place names come
@@ -555,7 +561,9 @@ function navLabel(){return ymd(day).toLocaleDateString('en-US',{timeZone:'UTC',w
 function shiftDay(iso,n){const t=ymd(iso);t.setUTCDate(t.getUTCDate()+n);
   const p=x=>String(x).padStart(2,'0');
   return `${t.getUTCFullYear()}-${p(t.getUTCMonth()+1)}-${p(t.getUTCDate())}`;}
-function todayIn(z){try{return new Intl.DateTimeFormat('en-CA',{timeZone:z,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}catch(e){return DAY0;}}
+/* The catch falls back to the DEVICE's own date, never to DAY0 - an Intl throw
+   used to pin the page to the build day permanently. */
+function todayIn(z){try{return new Intl.DateTimeFormat('en-CA',{timeZone:z,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}catch(e){var t=new Date(),p=function(x){return String(x).padStart(2,'0');};return t.getFullYear()+'-'+p(t.getMonth()+1)+'-'+p(t.getDate());}}
 
 /* ---- the row. Honest about a non-event: no time, and the reason in the sub. ---- */
 function reason(e){const byKey=NONE[e.key]||{};return byKey[e.status]||('None - The solver reported: '+e.status);}
@@ -602,7 +610,10 @@ function render(){
   for(const e of DATA.events){if(!e.utc)continue;if(seen[e.key])DUP.add(e.key);seen[e.key]=1;}
   const ctx=range==='now'?` still ahead on ${dayLabel()}`:` on ${dayLabel()}`;
   $('status').textContent=`${ev.length} event${ev.length===1?'':'s'}${ctx}`;
-  list.append(el('div','month',dayLabel()+' - '+locLabel()));
+  /* An h2, not a div. render() opens with clear($('list')), which removes the
+     prerendered <h2> and replaced it with a plain div - so the post-JS DOM that
+     Google actually indexes had NO heading for the page's primary content. */
+  list.append(el('h2','month',dayLabel()+' - '+locLabel()));
   ev.forEach(e=>list.append(row(e)));
   tick();
 }
@@ -611,12 +622,16 @@ function render(){
 function gotoDay(d){
   if(!/^\d{4}-\d{2}-\d{2}$/.test(d))return;
   const y=+d.slice(0,4); if(y<Y0||y>Y1)return;
-  day=d; syncDayNav(); if(window.__dayBox)window.__dayBox(d);
+  day=d; dayPinned=true; syncDayNav(); if(window.__dayBox)window.__dayBox(d);
   try{history.replaceState(null,'','#d='+d);}catch(e){}
   compute();
 }
 function syncDayNav(){
   const now=$('day-now'); if(now)now.textContent=navLabel();
+  /* The wheels follow the day AT BOOT too, not only after gotoDay. They were
+     seeded from DAY0 and never resynced, so with no rebuild the picker's drift
+     from the displayed day grew without bound - March 2027 ladder, August 2026 wheels. */
+  if(window.__dayBox)window.__dayBox(day);
   const p=$('day-prev'), n=$('day-next');
   if(p)p.href='#d='+shiftDay(day,-1);
   if(n)n.href='#d='+shiftDay(day,1);
@@ -1024,7 +1039,7 @@ GEO.onChange(function(l){
   var first=!loc;
   loc=l;
   try{new Intl.DateTimeFormat('en-US',{timeZone:l.tz});tz=l.tz;}catch(e){}
-  if(first)day=todayIn(tz);
+  if(!dayPinned)day=todayIn(tz);
   syncDayNav();buildControls();compute();
 });
 GEO.initLocation().catch(function(){});
@@ -1350,6 +1365,11 @@ _MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
 DAY = (_dt.strptime(_args.date, '%Y-%m-%d').date() if _args.date
        else _dt.now(_PT).date())
 
+# The day the FILE was written, which is what dateModified and sitemap <lastmod>
+# both actually mean. DAY is the day the page is ABOUT - a different fact, and
+# conflating them is what let a frozen page keep claiming daily freshness.
+BUILD_DATE = _dt.now(_PT).date().isoformat()
+
 # ---- ladder tables, derived from the engine so they cannot drift ----
 _LADDER_JS = [[k, lab, body] for (k, lab, body, _d, _m, _p2, _t) in _solar.LADDER]
 
@@ -1663,11 +1683,15 @@ def _build_page(d):
     dia = day_data['moon']['apparent_diameter_arcsec']
 
     # --- prerendered crawlable list (the JS list hydrates over it) ---
-    pre = [f'<p class="seo-lead">{_html.escape(_day_summary(day_data, d))} '
+    # The qualifier leads. It used to arrive after ~400 characters of numbers, so a
+    # scraper quoting the opening clause walked away with bare times and no idea
+    # whose day or whose horizon they belonged to.
+    pre = ['<p class="seo-lead">This block is a worked example for the default observer, '
+           f'{_html.escape(OBS_LABEL)} - Choose your own location on the page and the whole '
+           'ladder recomputes on your device, for your latitude, longitude and day. '
+           f'{_html.escape(_day_summary(day_data, d))} '
            'Every twilight, golden hour, transit, moonrise and moonset below is solved to the '
-           f'second with the Swiss Ephemeris (DE441) for {_html.escape(OBS_LABEL)} - Choose your '
-           'own location on the page and the whole ladder recomputes on your device, for your '
-           'latitude, longitude and day.</p>',
+           'second with the Swiss Ephemeris (DE441).</p>',
            f'<h2>{_html.escape(_long(d))} - {_html.escape(OBS_LABEL)}</h2><ul>']
     for e in evs:
         glyph = '☉' if e['body'] == 'sun' else '☽'
@@ -1705,7 +1729,7 @@ def _build_page(d):
     dstr = d.strftime('%B %-d, %Y')
     faq = []
 
-    q1 = f'What time is sunrise and sunset in {OBS_LABEL} on {dstr}?'
+    q1 = 'What time is sunrise and sunset?'
     if sr and ss:
         tail1 = f' That is a day {_dur(dl_s)} long.' if dl_s else ''
         # "on <full datetime>", never "at <full datetime>" - _fmt already carries
@@ -1722,7 +1746,7 @@ def _build_page(d):
 
     ga, gb = _first(day_data, 'golden_hour_start_am'), _first(day_data, 'golden_hour_end_am')
     gc, gd = _first(day_data, 'golden_hour_start_pm'), _first(day_data, 'golden_hour_end_pm')
-    q2 = f'When is golden hour on {dstr}?'
+    q2 = 'When is golden hour?'
     if ga and gb and gc and gd:
         tail2 = (' Golden hour is bounded by the Sun centre passing 4 degrees below and 6 degrees '
                  'above the horizon, so it moves with your latitude and the season, not by a fixed hour.')
@@ -1738,7 +1762,7 @@ def _build_page(d):
         faq.append((q2, a2, _html.escape(a2)))
 
     ad, aw = _first(day_data, 'astronomical_dusk'), _first(day_data, 'astronomical_dawn')
-    q3 = f'When does it get fully dark on {dstr}?'
+    q3 = 'When does it get fully dark?'
     if ad and aw:
         # Dusk and dawn are stated as two separate instants, never as one
         # interval: both belong to this local day, but the dawn closes the
@@ -1756,7 +1780,7 @@ def _build_page(d):
         faq.append((q3, a3, _html.escape(a3)))
 
     mr, ms = _first(day_data, 'moonrise'), _first(day_data, 'moonset')
-    q4 = f'What is the Moon doing on {dstr}?'
+    q4 = 'How much of the Moon is lit, and when does it rise and set?'
     lead4 = f'The Moon is {ill:.1f} percent illuminated and {dia:.1f} arcseconds across. '
     if mr and ms:
         faq.append((q4, lead4 + f'It rises on {_fmt(mr)} and sets on {_fmt(ms)}.',
@@ -1784,6 +1808,17 @@ def _build_page(d):
                     .replace('None - ', '').rstrip('.') + '.')
         faq.append((q4, a4, _html.escape(a4)))
 
+    # The four answers above are WORKED EXAMPLES and now say so in their own first
+    # sentence. The QUESTIONS went evergreen so they match what a person actually
+    # types; the ANSWERS keep their full date, place and timezone, because a time
+    # printed without the day and place it belongs to is not "fresher" - it is
+    # unfalsifiable, which is the opposite of what this page is for. An LLM quoting
+    # any of these now carries the qualifier along with the number.
+    _ex = ('Wherever you are standing and whichever day you mean, the ladder at the top of '
+           'this page solves it on your device. Worked example, the default observer at '
+           f'{OBS_LABEL}. ')
+    faq = [(q, _ex + a, _html.escape(_ex) + h) for q, a, h in faq]
+
     # Say exactly what the cross-check covers. scripts/verify_solar.py models the
     # Sun with the NOAA Solar Calculator written longhand, and states in its own
     # header that NOAA has no lunar theory at all - the Moon is checked against a
@@ -1808,7 +1843,7 @@ def _build_page(d):
            'limits.')
     faq.append(('How accurate are these sunrise and sunset times?', acc, _html.escape(acc)))
 
-    fh = [f'<h2>{_html.escape(_long(d))} - Frequently Asked Questions</h2>',
+    fh = ['<h2>Sunrise, Sunset and Twilight - Frequently Asked Questions</h2>',
           '<p class="lead">SUNMAP is the most precise sunrise and sunset calculator on the web - '
           'The whole solar and lunar day to the second, in your own timezone and from where you '
           'actually stand. The answers below come straight from the data.</p>']
@@ -1837,16 +1872,20 @@ def _build_page(d):
     # Google truncates past about 160 characters, so this stays inside the
     # 50-170 window scripts/seo_check.py enforces. The long-form pitch lives in
     # og_desc below, where social cards give it room.
-    desc = (f'Sunrise, sunset, twilight, golden hour and the Moon, solved to the second '
-            f'for where you stand. {dstr} at {OBS_LABEL}: {_facts}.')
-    if len(desc) > 170:
-        desc = (f'Sunrise, sunset, twilight, golden hour and the Moon, solved to the '
-                f'second for where you stand. {dstr} at {OBS_LABEL}.')
+    # EVERGREEN. This URL is the only indexable one - the day nav uses #d= hash
+    # fragments, which create no crawlable pages - so a description naming one
+    # specific day made the whole document claim to be about that day, forever.
+    desc = ('Sunrise, sunset, twilight, golden hour and the Moon, solved to the second '
+            f'for exactly where you stand, on any day from {YEARS[0]} to {YEARS[-1]}. '
+            'Computed on your device.')
     # House style capitalizes the first word after a " - " separator, and _facts
     # is a lowercase fact list ("sunrise 6:01 AM, ...") built for mid-sentence use
     # in `desc`, so it gets an initial cap here and only here.
-    og_desc = (f'The whole solar and lunar day to the second, topocentric to where you stand - '
-               f'{_facts[:1].upper()}{_facts[1:]}')
+    # The one outright dishonest string on the page: concrete times with NO date
+    # and NO place, which every social unfurl and AI preview carried verbatim.
+    og_desc = ('The whole solar and lunar day to the second, topocentric to where you stand - '
+               'Every twilight, both golden hours, solar noon and the Moon, solved in your '
+               'browser for your day and your place.')
     keywords = ('sunrise time, sunset time, golden hour calculator, blue hour, civil twilight, '
                 'nautical twilight, astronomical twilight, moonrise time, moonset time, solar noon, '
                 'day length calculator, sunrise sunset by location')
@@ -1879,7 +1918,7 @@ def _build_page(d):
          'isPartOf': {'@id': 'https://puddystudios.com/#website'},
          'primaryImageOfPage': {'@id': f'{page_url}#primaryimage'},
          'image': {'@id': f'{page_url}#primaryimage'},
-         'dateModified': d.isoformat(),
+         'dateModified': BUILD_DATE,
          'description': ('The whole solar and lunar day timed to the second on the Swiss Ephemeris '
                          'engine, topocentric to the observer.'),
          'about': ['Sunrise', 'Sunset', 'Twilight', 'Golden hour', 'Moonrise', 'Solar noon', 'Day length'],
@@ -1901,9 +1940,11 @@ def _build_page(d):
          'url': page_url, 'image': og_img,
          'keywords': ['sunrise', 'sunset', 'twilight', 'golden hour', 'moonrise', 'moonset',
                       'solar noon', 'day length'],
-         'temporalCoverage': f'{d.isoformat()}/{d.isoformat()}',
-         'spatialCoverage': {'@type': 'Place', 'name': OBS_LABEL,
-                             'geo': {'@type': 'GeoCoordinates', 'latitude': OBS_LAT, 'longitude': OBS_LON}},
+         'temporalCoverage': f'{YEARS[0]}-01-01/{YEARS[-1]}-12-31',
+         # A product whose entire pitch is "wherever you stand" declared its coverage
+         # as one point in Manhattan. No rebuild cadence would ever have fixed that axis.
+         'spatialCoverage': {'@type': 'Place', 'name': 'Anywhere on Earth',
+                             'geo': {'@type': 'GeoShape', 'box': '-90 -180 90 180'}},
          'creator': {'@id': 'https://puddystudios.com/#org'},
          'publisher': {'@id': 'https://puddystudios.com/#org'},
          'inLanguage': 'en',
@@ -1994,7 +2035,6 @@ def _build_page(d):
         '__DAY0__': d.isoformat(),
         '__TZ0__': OBS_TZ,
         '__DESC__': desc,
-        '__YEAR__': _long(d),
         '__Y0__': str(YEARS[0]),
         '__Y1__': str(YEARS[-1]),
         '__B__': BASE,
@@ -2019,20 +2059,16 @@ from datetime import date as _date
 # lastmod 2026-08-11, telling Googlebot's first crawl of a brand-new domain that a
 # page declaring changefreq=daily was last modified the day before the day it is
 # about. DAY is the rendered date, so the two can no longer disagree.
-# lastmod tracks the EDITION the page carries, CLAMPED to never be in the future.
-# Two rules were in tension and both are right: a page declaring changefreq=daily
-# should not tell a first crawl it was last modified the day before the day it is
-# about, and a sitemap must never claim a future lastmod (seo_check enforces the
-# latter, and caught this). min() satisfies both - on the ship morning the edition
-# IS today so lastmod is the edition; pre-building tomorrow's edition tonight
-# emits today, which is both valid and true, since that is when the file was written.
-_today = min(DAY, _date.today()).isoformat()
+# lastmod means WHEN THE FILE WAS WRITTEN. That is all it has ever meant, and with
+# changefreq gone there is nothing left to reconcile it against - the min() clamp
+# existed only because changefreq=daily forced "edition" and "wall clock" to agree.
+_today = BUILD_DATE
 _sm = ['<?xml version="1.0" encoding="UTF-8"?>',
        '<!-- SPDX-License-Identifier: AGPL-3.0-or-later',
        '     Copyright (C) 2026 PUDDY Inc. <legal@puddystudios.com> -->',
        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
        'xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
-       f'<url><loc>{PROD}</loc><lastmod>{_today}</lastmod><changefreq>daily</changefreq><priority>1.0</priority>'
+       f'<url><loc>{PROD}</loc><lastmod>{_today}</lastmod><priority>1.0</priority>'
        f'<image:image><image:loc>{OG_SITE}og/sunmap-og.png</image:loc>'
        f'<image:title>SUNMAP - Sunrise, Sunset and Twilight, Timed to the Second</image:title></image:image></url>',
        '</urlset>']
@@ -2090,8 +2126,11 @@ solar midnight; and moonrise, lunar noon, moonset and lunar midnight.
   36.7 arcminutes Swiss Ephemeris models, against the classic 34 arcminute
   convention, while real atmosphere departs from both.
 - Coverage: any day from {YEARS[0]} to {YEARS[-1]}, anywhere on Earth.
-- The prerendered copy a crawler sees is computed for {OBS_LABEL}
-  ({OBS_LAT}, {OBS_LON}); choosing a location recomputes every row on the device.
+- The prerendered copy a crawler sees is a WORKED EXAMPLE, computed for {OBS_LABEL}
+  ({OBS_LAT}, {OBS_LON}) on {DAY.isoformat()}; choosing a location recomputes every
+  row on the device, for that visitor's own day and place. The page is not rebuilt
+  on a schedule and does not need to be - every dated string in it names its own
+  day, and every live number is solved in the browser.
 
 ## Key URLs
 
