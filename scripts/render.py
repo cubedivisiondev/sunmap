@@ -189,6 +189,8 @@ __JSONLD__
   .day-box:hover{color:var(--fg);border-color:var(--faint)}
   .day-box:focus{outline:none;color:var(--fg);border-color:var(--faint)}
   .day-box.empty{color:var(--dim)}
+  .xlink{display:block;margin:8px auto 0;width:200px;box-sizing:border-box;font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;text-align:center;color:var(--dim);background:rgba(0,0,0,.3);border:1px solid var(--line);border-radius:3px;padding:7px 18px;text-decoration:none;transition:.12s}
+  .xlink:hover{color:var(--fg);border-color:var(--faint)}
   #day-cal{position:fixed;transform:translateX(-50%);z-index:9999;width:300px;background:#000;border:1px solid var(--faint);border-radius:6px;padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.72)}
   #day-cal[hidden]{display:none}
   .dc-wheels{position:relative;display:flex;gap:6px;height:180px;overflow:hidden;margin-bottom:12px}
@@ -547,7 +549,9 @@ function fillTime(host,iso){
 }
 function ymd(iso){const p=iso.split('-');return new Date(Date.UTC(+p[0],+p[1]-1,+p[2]));}
 function dayLabel(){return ymd(day).toLocaleDateString('en-US',{timeZone:'UTC',weekday:'long',month:'long',day:'numeric',year:'numeric'});}
-function navLabel(){return ymd(day).toLocaleDateString('en-US',{timeZone:'UTC',weekday:'long',month:'long',day:'numeric'});}
+/* "Wednesday, August 12 2026" - the year included, and the comma before it dropped
+   so it reads the way the founder writes it rather than the way Intl does. */
+function navLabel(){return ymd(day).toLocaleDateString('en-US',{timeZone:'UTC',weekday:'long',month:'long',day:'numeric',year:'numeric'}).replace(/,(\s+\d{4})$/,'$1');}
 function shiftDay(iso,n){const t=ymd(iso);t.setUTCDate(t.getUTCDate()+n);
   const p=x=>String(x).padStart(2,'0');
   return `${t.getUTCFullYear()}-${p(t.getUTCMonth()+1)}-${p(t.getUTCDate())}`;}
@@ -630,7 +634,7 @@ function dayHash(){
   window.addEventListener('hashchange',dayHash);
 })();
 
-/* PICK A DATE - the same iOS-style scroll wheels STARMAP uses (month / day /
+/* CHOOSE DAY - the same iOS-style scroll wheels STARMAP uses (month / day /
    year), no typing needed, no third-party calls. The centred row under the band
    is the selection; "Go to day" applies it. */
 (function(){
@@ -658,7 +662,10 @@ function dayHash(){
      the day column's own reflow-induced scroll events, so the month + year
      wheels stay fully responsive (no global lock). */
   function buildDays(){colD._busy=true;fillDays();requestAnimationFrame(()=>{setCol(colD,sd-1);setTimeout(()=>{colD._busy=false;},120);});}
-  function setBox(v){inp.textContent=v||'PICK A DATE';inp.classList.toggle('empty',!v);}
+  /* The label is CONSTANT. It used to show the picked day as a raw ISO string -
+     "2026-08-12" - a machine format sitting in the middle of a page whose whole
+     point is legible time. The chosen day is already spelled out directly above. */
+  function setBox(v){inp.textContent='CHOOSE DAY';inp.classList.toggle('empty',!v);}
   function pick(unit,i){
     if(unit==='mon'){sm=i;buildDays();}
     else if(unit==='day'){sd=i+1;}
@@ -1050,7 +1057,13 @@ dayHash();
     // position:fixed, so getBoundingClientRect's viewport coordinates ARE canvas
     // coordinates - no scroll arithmetic, and no hardcoded guess that drifts the moment
     // the h1 wraps, the clamp() type resizes, or the day nav gains a row.
-    var el=document.querySelector('.sigil'), r=el&&el.getBoundingClientRect();
+    /* Anchor on the CORE FACE itself - the single puddy at the dead centre of the
+       crest - not on the SVG's bounding box. The two coincide while the crest is
+       symmetric, which makes a box-based origin look correct right up until the
+       geometry changes. Measuring the thing the beams actually come out of removes
+       that dependency entirely. */
+    var el=document.getElementById('sigil-core')||document.querySelector('.sigil');
+    var r=el&&el.getBoundingClientRect();
     if(r&&r.width>0){ OX=r.left+r.width/2; OY=r.top+r.height/2; }
     else { OX=W/2; OY=H*0.3; }
     // Reach = the distance to the farthest corner, so the field dissolves at the same
@@ -1129,7 +1142,16 @@ dayHash();
   function run(){ if(!raf) raf=requestAnimationFrame(frame); }
   var rt;
   function schedule(){clearTimeout(rt); rt=setTimeout(function(){build(); paint(); run();},150);}
-  if(window.ResizeObserver){try{new ResizeObserver(schedule).observe(document.documentElement);}catch(e){}}
+  if(window.ResizeObserver){try{
+    var _ro=new ResizeObserver(function(){ stale=true; schedule(); });
+    _ro.observe(document.documentElement);
+    /* Also observe the CREST. The viewport can stay exactly the same size while the
+       sigil still moves - the h1 rewrapping, a webfont landing, the day nav gaining
+       a row - and a documentElement-only observer never fires for any of those, so
+       the burst would keep radiating from where the sigil used to be. */
+    var _cr=document.querySelector('.crest')||document.querySelector('.sigil');
+    if(_cr) _ro.observe(_cr);
+  }catch(e){}}
   window.addEventListener('resize', schedule);
   // The sigil scrolls; the fixed canvas does not. Flag the origin dirty and let the one
   // rAF loop re-measure at most once a frame - never a getBoundingClientRect per event.
@@ -1263,9 +1285,18 @@ _GOLD_STROKES = sum(1 for _s in _p if f'stroke="{_GOLD}"' in _s)
 assert (_WHITE_STROKES, _GOLD_STROKES) == (32, 11), (
     'crest stroke budget drifted: %d white + %d gold (want 32 + 11)' % (_WHITE_STROKES, _GOLD_STROKES))
 _GEOM = ''.join(_p)                          # the structure alone - spheres, rays, weave
-for _cx, _cy in _nodes:
-    _p.append(f'<use href="#puddy-face" x="{_cx-7:.2f}" y="{_cy-7:.2f}" width="14" height="14"/>')
+for _i, (_cx, _cy) in enumerate(_nodes):
+    # _nodes[0] is the CORE face, dead centre at (_CX,_CY). It carries an id so the
+    # beam field can anchor to that exact face rather than to the SVG's bounding
+    # box - those coincide today only because the crest happens to be symmetric.
+    _idattr = ' id="sigil-core"' if _i == 0 else ''
+    _p.append(f'<use{_idattr} href="#puddy-face" x="{_cx-7:.2f}" y="{_cy-7:.2f}" width="14" height="14"/>')
 _SIGIL = ''.join(_p)
+
+# The sibling product's home. Derived from --site so the link matches the build's
+# environment by construction; a dev build cannot ship a prod link.
+_SIBLING = ('https://starmap.puddy.dev/' if 'puddy.dev' in _args.site
+            else 'https://starmap.puddystudios.com/')
 
 # THE FAVICON is the SAME crest, generated from the SAME geometry, so the two can never
 # drift apart. It is emitted by this script rather than hand-kept, because a hand-kept
@@ -1919,11 +1950,11 @@ def _build_page(d):
     daynav = ('<div class="yn-select"><button id="yn-open" type="button" aria-haspopup="dialog">Select day</button></div>'
               '<div class="yn-spread">'
               f'<a href="#d={prev_iso}" id="day-prev" rel="prev">&laquo; Prev</a>'
-              f'<span class="ynow" id="day-now">{_html.escape(d.strftime("%A, %B %-d"))}</span>'
+              f'<span class="ynow" id="day-now">{_html.escape(d.strftime("%A, %B %-d %Y"))}</span>'
               f'<a href="#d={next_iso}" id="day-next" rel="next">Next &raquo;</a>'
               '</div>'
               '<div class="yn-day">'
-              f'<button type="button" id="day-input" class="day-box empty" aria-haspopup="dialog" aria-expanded="false" aria-label="Pick a date from {YEARS[0]} to {YEARS[-1]} - Scroll the month, day and year wheels">PICK A DATE</button>'
+              f'<button type="button" id="day-input" class="day-box empty" aria-haspopup="dialog" aria-expanded="false" aria-label="Choose a day from {YEARS[0]} to {YEARS[-1]} - Scroll the month, day and year wheels">CHOOSE DAY</button>'
               '<div id="day-cal" hidden role="dialog" aria-label="Pick a day">'
               '<div class="dc-wheels">'
               '<div class="dc-col" id="dc-mon" role="listbox" aria-label="Month"></div>'
@@ -1931,6 +1962,7 @@ def _build_page(d):
               '<div class="dc-col" id="dc-yr" role="listbox" aria-label="Year"></div>'
               '<div class="dc-band" aria-hidden="true"></div>'
               '</div><button type="button" id="dc-go">Go to day</button></div>'
+              f'<a class="xlink" href="{_SIBLING}">Check out STARMAP</a>'
               '</div>')
 
     # --- apply (longest placeholder keys first so __DAY0__ never clobbers a longer key) ---
