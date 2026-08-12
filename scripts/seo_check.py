@@ -97,6 +97,17 @@ COLOR_RE = re.compile(r"^(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\)|[a-zA-
 # not "broken", and must not be reported as a content defect.
 GATED = (401, 403)
 
+def gate_ok(env: str) -> bool:
+    """Is an auth gate an acceptable answer here?
+
+    On the dev host, yes - the shared password gate is the point, and reporting
+    it once beats a cascade of derived failures about files we were never
+    allowed to read. On PROD, emphatically no. Prod is public and indexable, so
+    a 401/403 there is not "unaudited", it is the site being unreachable to
+    Googlebot and to every visitor. Tolerating it silently would let a broken
+    prod ship report PASS having audited nothing at all."""
+    return env != "prod" 
+
 # --- AGPL surface -------------------------------------------------------------
 # SUNMAP serves a WebAssembly build of the Swiss Ephemeris to every visitor's
 # browser. That is conveying object code, and GPL-3.0 section 6(d) - the clause
@@ -830,7 +841,7 @@ def audit_site(rep: Report, src: Source, env: str, pages: list[str],
 
     # --- robots.txt ---------------------------------------------------------
     status, blob, note = src.get("/robots.txt")
-    if status in GATED:
+    if status in GATED and gate_ok(env):
         # The dev surfaces sit behind a shared password gate. Reporting the gate
         # once beats emitting a cascade of derived failures about a file we were
         # never allowed to read.
@@ -921,7 +932,7 @@ def audit_site(rep: Report, src: Source, env: str, pages: list[str],
 
 
 # --------------------------------------------------------------- agpl surface --
-def audit_agpl(rep: Report, src: Source) -> None:
+def audit_agpl(rep: Report, src: Source, env: str) -> None:
     """Assert the corresponding-source offer exists, resolves, and corresponds.
 
     Runs in both environments. The obligation attaches to serving the binary, so
@@ -931,7 +942,7 @@ def audit_agpl(rep: Report, src: Source) -> None:
     sec = "AGPL"
 
     st, engine, note = src.get(ENGINE_BINARY)
-    if st in GATED:
+    if st in GATED and gate_ok(env):
         rep.warn(sec, "engine served", f"HTTP {st} - behind the auth gate, AGPL surface not audited")
         return
     rep.check(sec, st == 200, "engine served",
@@ -1105,20 +1116,29 @@ def main() -> int:
     rep = Report(args.strict)
     all_titles: dict[str, str] = {}
     all_descs: dict[str, str] = {}
+    audited = 0
     for page in pages:
         status, body, note = src.get(page if args.url is None else urljoin(src.base_url, page))
-        if status in GATED:
+        if status in GATED and gate_ok(env):
             rep.warn(f"PAGE {page}", "fetch",
                      f"HTTP {status} - behind the dev password gate, page not audited ({note})")
             continue
         if status != 200:
             rep.fail(f"PAGE {page}", "fetch", f"HTTP/FS {status} for {note}")
             continue
+        audited += 1
         audit_page(rep, page, body, src, env, all_titles, all_descs,
                    page_role(page, sitemap_paths), robots_blocks_all)
 
     audit_site(rep, src, env, pages, sitemap_paths)
-    audit_agpl(rep, src)
+    audit_agpl(rep, src, env)
+
+    # A run that read nothing is not a pass. Every page can be skipped legitimately
+    # (a gated dev host), and the summary would then print PASS over an empty audit
+    # - which reads as "verified" to whoever is about to ship. Say so instead.
+    if audited == 0:
+        rep.fail("SITE", "something was audited",
+                 f"0 of {len(pages)} page(s) could be read, so this run verified nothing")
     return rep.render()
 
 
